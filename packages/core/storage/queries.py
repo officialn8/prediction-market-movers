@@ -1,0 +1,526 @@
+"""
+Raw SQL queries for market data operations.
+Centralized query definitions for consistency and maintainability.
+"""
+
+from dataclasses import dataclass
+from datetime import datetime
+from decimal import Decimal
+from typing import Optional
+from uuid import UUID
+
+from packages.core.storage.db import get_db_pool
+
+
+@dataclass
+class MarketQueries:
+    """
+    SQL query methods for market operations.
+    Uses raw SQL for performance and explicit control.
+    """
+    
+    # =========================================================================
+    # MARKET OPERATIONS
+    # =========================================================================
+    
+    @staticmethod
+    def upsert_market(
+        source: str,
+        source_id: str,
+        title: str,
+        category: Optional[str] = None,
+        status: str = "active",
+        url: Optional[str] = None,
+    ) -> dict:
+        """
+        Insert or update a market (upsert by source + source_id).
+        
+        Returns:
+            The upserted market record as a dict
+        """
+        db = get_db_pool()
+        query = """
+            INSERT INTO markets (source, source_id, title, category, status, url)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (source, source_id) 
+            DO UPDATE SET 
+                title = EXCLUDED.title,
+                category = EXCLUDED.category,
+                status = EXCLUDED.status,
+                url = EXCLUDED.url,
+                updated_at = NOW()
+            RETURNING *
+        """
+        result = db.execute(
+            query,
+            (source, source_id, title, category, status, url),
+            fetch=True,
+        )
+        return result[0] if result else {}
+    
+    @staticmethod
+    def get_market_by_source(source: str, source_id: str) -> Optional[dict]:
+        """Get a market by its source and source_id."""
+        db = get_db_pool()
+        query = """
+            SELECT * FROM markets 
+            WHERE source = %s AND source_id = %s
+        """
+        result = db.execute(query, (source, source_id), fetch=True)
+        return result[0] if result else None
+    
+    @staticmethod
+    def get_active_markets(
+        source: Optional[str] = None,
+        category: Optional[str] = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """Get active markets with optional filtering."""
+        db = get_db_pool()
+        
+        conditions = ["status = 'active'"]
+        params = []
+        
+        if source:
+            conditions.append("source = %s")
+            params.append(source)
+        if category:
+            conditions.append("category = %s")
+            params.append(category)
+        
+        params.append(limit)
+        
+        query = f"""
+            SELECT * FROM markets 
+            WHERE {' AND '.join(conditions)}
+            ORDER BY updated_at DESC
+            LIMIT %s
+        """
+        return db.execute(query, tuple(params), fetch=True) or []
+    
+    # =========================================================================
+    # TOKEN OPERATIONS
+    # =========================================================================
+    
+    @staticmethod
+    def upsert_token(
+        market_id: UUID,
+        outcome: str,
+        symbol: Optional[str] = None,
+        source_token_id: Optional[str] = None,
+    ) -> dict:
+        """
+        Insert or update a market token.
+        
+        Returns:
+            The upserted token record
+        """
+        db = get_db_pool()
+        query = """
+            INSERT INTO market_tokens (market_id, outcome, symbol, source_token_id)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (market_id, outcome)
+            DO UPDATE SET 
+                symbol = EXCLUDED.symbol,
+                source_token_id = EXCLUDED.source_token_id
+            RETURNING *
+        """
+        result = db.execute(
+            query,
+            (str(market_id), outcome, symbol, source_token_id),
+            fetch=True,
+        )
+        return result[0] if result else {}
+    
+    @staticmethod
+    def get_tokens_for_market(market_id: UUID) -> list[dict]:
+        """Get all tokens for a specific market."""
+        db = get_db_pool()
+        query = """
+            SELECT * FROM market_tokens 
+            WHERE market_id = %s
+            ORDER BY outcome
+        """
+        return db.execute(query, (str(market_id),), fetch=True) or []
+    
+    # =========================================================================
+    # SNAPSHOT OPERATIONS
+    # =========================================================================
+    
+    @staticmethod
+    def insert_snapshot(
+        token_id: UUID,
+        price: Decimal,
+        volume_24h: Optional[Decimal] = None,
+        spread: Optional[Decimal] = None,
+        ts: Optional[datetime] = None,
+    ) -> dict:
+        """
+        Insert a new price snapshot (append-only).
+        
+        Returns:
+            The inserted snapshot record
+        """
+        db = get_db_pool()
+        
+        if ts:
+            query = """
+                INSERT INTO snapshots (ts, token_id, price, volume_24h, spread)
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING *
+            """
+            params = (ts, str(token_id), price, volume_24h, spread)
+        else:
+            query = """
+                INSERT INTO snapshots (token_id, price, volume_24h, spread)
+                VALUES (%s, %s, %s, %s)
+                RETURNING *
+            """
+            params = (str(token_id), price, volume_24h, spread)
+        
+        result = db.execute(query, params, fetch=True)
+        return result[0] if result else {}
+    
+    @staticmethod
+    def insert_snapshots_batch(
+        snapshots: list[dict],
+    ) -> int:
+        """
+        Batch insert multiple snapshots efficiently.
+        
+        Args:
+            snapshots: List of dicts with keys: token_id, price, volume_24h, spread
+            
+        Returns:
+            Number of rows inserted
+        """
+        if not snapshots:
+            return 0
+        
+        db = get_db_pool()
+        query = """
+            INSERT INTO snapshots (token_id, price, volume_24h, spread)
+            VALUES (%s, %s, %s, %s)
+        """
+        params_seq = [
+            (
+                str(s["token_id"]),
+                s["price"],
+                s.get("volume_24h"),
+                s.get("spread"),
+            )
+            for s in snapshots
+        ]
+        return db.execute_many(query, params_seq)
+    
+    @staticmethod
+    def get_latest_snapshot(token_id: UUID) -> Optional[dict]:
+        """Get the most recent snapshot for a token."""
+        db = get_db_pool()
+        query = """
+            SELECT * FROM snapshots 
+            WHERE token_id = %s
+            ORDER BY ts DESC
+            LIMIT 1
+        """
+        result = db.execute(query, (str(token_id),), fetch=True)
+        return result[0] if result else None
+    
+    @staticmethod
+    def get_snapshots_range(
+        token_id: UUID,
+        start_ts: datetime,
+        end_ts: Optional[datetime] = None,
+    ) -> list[dict]:
+        """Get snapshots for a token within a time range."""
+        db = get_db_pool()
+        
+        if end_ts:
+            query = """
+                SELECT * FROM snapshots 
+                WHERE token_id = %s AND ts >= %s AND ts <= %s
+                ORDER BY ts ASC
+            """
+            params = (str(token_id), start_ts, end_ts)
+        else:
+            query = """
+                SELECT * FROM snapshots 
+                WHERE token_id = %s AND ts >= %s
+                ORDER BY ts ASC
+            """
+            params = (str(token_id), start_ts)
+        
+        return db.execute(query, params, fetch=True) or []
+    
+    # =========================================================================
+    # TOP MOVERS QUERIES
+    # =========================================================================
+    
+    @staticmethod
+    def get_top_movers(
+        hours: int = 24,
+        limit: int = 20,
+        source: Optional[str] = None,
+        direction: str = "both",
+    ) -> list[dict]:
+        """
+        Get top price movers over a given time period.
+        """
+        db = get_db_pool()
+
+        source_filter = "AND m.source = %s" if source else ""
+
+        if direction == "gainers":
+            direction_filter = "AND pct_change > 0"
+            order = "pct_change DESC"
+        elif direction == "losers":
+            direction_filter = "AND pct_change < 0"
+            order = "pct_change ASC"
+        else:
+            direction_filter = ""
+            order = "ABS(pct_change) DESC"
+
+        query = f"""
+            WITH latest AS (
+                SELECT DISTINCT ON (token_id)
+                    token_id,
+                    ts as latest_ts,
+                    price as latest_price
+                FROM snapshots
+                ORDER BY token_id, ts DESC
+            ),
+            historical AS (
+                SELECT DISTINCT ON (token_id)
+                    token_id,
+                    price as old_price
+                FROM snapshots
+                WHERE ts <= NOW() - (%s * INTERVAL '1 hour')
+                ORDER BY token_id, ts DESC
+            ),
+            changes AS (
+                SELECT
+                    l.token_id,
+                    l.latest_ts,
+                    l.latest_price,
+                    h.old_price,
+                    CASE
+                        WHEN h.old_price > 0 THEN
+                            ROUND(((l.latest_price - h.old_price) / h.old_price * 100)::numeric, 2)
+                        ELSE NULL
+                    END as pct_change
+                FROM latest l
+                JOIN historical h ON l.token_id = h.token_id
+            )
+            SELECT
+                c.*,
+                mt.market_id,
+                mt.outcome,
+                m.title,
+                m.source,
+                m.category,
+                m.url
+            FROM changes c
+            JOIN market_tokens mt ON c.token_id = mt.token_id
+            JOIN markets m ON mt.market_id = m.market_id
+            WHERE m.status = 'active'
+              AND c.pct_change IS NOT NULL
+              {source_filter}
+              {direction_filter}
+            ORDER BY {order}
+            LIMIT %s
+        """
+
+        params = [hours]
+        if source:
+            params.append(source)
+        params.append(limit)
+
+        return db.execute(query, tuple(params), fetch=True) or []
+    
+    @staticmethod
+    def get_market_with_tokens_and_latest_prices(market_id: UUID) -> Optional[dict]:
+        """
+        Get full market details with tokens and latest prices.
+        Used for market detail view.
+        """
+        db = get_db_pool()
+        query = """
+            SELECT 
+                m.*,
+                json_agg(
+                    json_build_object(
+                        'token_id', mt.token_id,
+                        'outcome', mt.outcome,
+                        'symbol', mt.symbol,
+                        'latest_price', (
+                            SELECT price FROM snapshots 
+                            WHERE token_id = mt.token_id 
+                            ORDER BY ts DESC LIMIT 1
+                        ),
+                        'latest_volume', (
+                            SELECT volume_24h FROM snapshots 
+                            WHERE token_id = mt.token_id 
+                            ORDER BY ts DESC LIMIT 1
+                        )
+                    )
+                ) as tokens
+            FROM markets m
+            LEFT JOIN market_tokens mt ON m.market_id = mt.market_id
+            WHERE m.market_id = %s
+            GROUP BY m.market_id
+        """
+        result = db.execute(query, (str(market_id),), fetch=True)
+        return result[0] if result else None
+
+
+@dataclass
+class AnalyticsQueries:
+    """
+    SQL query methods for analytics and alerts.
+    """
+    
+    @staticmethod
+    def insert_movers_batch(movers: list[dict]) -> int:
+        """
+        Batch insert precomputed top movers.
+        
+        Args:
+            movers: List of dicts matching MoverCache model fields
+        """
+        if not movers:
+            return 0
+            
+        db = get_db_pool()
+        query = """
+            INSERT INTO movers_cache (
+                as_of_ts, window_seconds, token_id, 
+                price_now, price_then, move_pp, abs_move_pp, 
+                rank, quality_score
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (as_of_ts, window_seconds, rank) DO NOTHING
+        """
+        
+        params_seq = [
+            (
+                m["as_of_ts"],
+                m["window_seconds"],
+                str(m["token_id"]),
+                m["price_now"],
+                m["price_then"],
+                m["move_pp"],
+                m["abs_move_pp"],
+                m["rank"],
+                m.get("quality_score"),
+            )
+            for m in movers
+        ]
+        
+        return db.execute_many(query, params_seq)
+
+    @staticmethod
+    def insert_alert(
+        token_id: UUID,
+        window_seconds: int,
+        move_pp: Decimal,
+        threshold_pp: Decimal,
+        reason: str,
+    ) -> dict:
+        """Insert a new alert."""
+        db = get_db_pool()
+        query = """
+            INSERT INTO alerts (
+                token_id, window_seconds, move_pp, 
+                threshold_pp, reason
+            )
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING *
+        """
+        result = db.execute(
+            query,
+            (str(token_id), window_seconds, move_pp, threshold_pp, reason),
+            fetch=True,
+        )
+        return result[0] if result else {}
+
+    @staticmethod
+    def get_recent_alerts(limit: int = 50, unconverged_only: bool = False) -> list[dict]:
+        """Get recent alerts."""
+        db = get_db_pool()
+        filter_clause = "WHERE acknowledged_at IS NULL" if unconverged_only else ""
+        
+        query = f"""
+            SELECT 
+                a.*,
+                mt.outcome,
+                mt.symbol,
+                m.title as market_title,
+                m.source
+            FROM alerts a
+            JOIN market_tokens mt ON a.token_id = mt.token_id
+            JOIN markets m ON mt.market_id = m.market_id
+            {filter_clause}
+            ORDER BY a.created_at DESC
+            LIMIT %s
+        """
+        return db.execute(query, (limit,), fetch=True) or []
+
+    @staticmethod
+    def get_cached_movers(
+        window_seconds: int = 3600,
+        limit: int = 20,
+        source: Optional[str] = None,
+        direction: str = "both",
+    ) -> list[dict]:
+        """
+        Get top movers from the cache (fast).
+        Includes join for market details.
+        """
+        db = get_db_pool()
+        
+        source_filter = "AND m.source = %s" if source else ""
+        
+        if direction == "gainers":
+            direction_filter = "AND mc.move_pp > 0"
+        elif direction == "losers":
+            direction_filter = "AND mc.move_pp < 0"
+        else:
+            direction_filter = ""
+            
+        # Get the latest cached batch for this window
+        query = f"""
+            WITH latest_batch AS (
+                SELECT MAX(as_of_ts) as max_ts
+                FROM movers_cache
+                WHERE window_seconds = %s
+            )
+            SELECT 
+                mc.*,
+                mc.move_pp as pct_change, -- Alias for compat
+                mc.price_now as latest_price,
+                mc.price_then as old_price,
+                mt.market_id,
+                mt.outcome,
+                mt.symbol,
+                m.title,
+                m.source,
+                m.category,
+                m.url
+            FROM movers_cache mc
+            JOIN latest_batch lb ON mc.as_of_ts = lb.max_ts
+            JOIN market_tokens mt ON mc.token_id = mt.token_id
+            JOIN markets m ON mt.market_id = m.market_id
+            WHERE mc.window_seconds = %s
+              {source_filter}
+              {direction_filter}
+            ORDER BY mc.rank ASC -- Pre-calculated rank
+            LIMIT %s
+        """
+        
+        params = [window_seconds, window_seconds]
+        if source:
+            params.append(source)
+        params.append(limit)
+        
+        return db.execute(query, tuple(params), fetch=True) or []
+
