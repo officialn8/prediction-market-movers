@@ -285,7 +285,8 @@ class MarketQueries:
                 SELECT DISTINCT ON (token_id)
                     token_id,
                     ts as latest_ts,
-                    price as latest_price
+                    price as latest_price,
+                    volume_24h as latest_volume
                 FROM snapshots
                 ORDER BY token_id, ts DESC
             ),
@@ -302,6 +303,7 @@ class MarketQueries:
                     l.token_id,
                     l.latest_ts,
                     l.latest_price,
+                    l.latest_volume,
                     h.old_price,
                     CASE
                         WHEN h.old_price > 0 THEN
