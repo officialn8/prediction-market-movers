@@ -1,0 +1,74 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: pm_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-pmuser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pmpass}
+      POSTGRES_DB: ${POSTGRES_DB:-prediction_movers}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pmuser} -d ${POSTGRES_DB:-prediction_movers}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - pm_network
+
+  collector:
+    build:
+      context: .
+      dockerfile: apps/collector/Dockerfile
+    container_name: pm_collector
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-pmuser}:${POSTGRES_PASSWORD:-pmpass}@postgres:5432/${POSTGRES_DB:-prediction_movers}
+      # Mode: "simulated", "polymarket", or "live" (polymarket + kalshi)
+      COLLECTOR_MODE: ${COLLECTOR_MODE:-polymarket}
+      COLLECTOR_INTERVAL_SECONDS: ${COLLECTOR_INTERVAL_SECONDS:-30}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./apps/collector:/app/apps/collector
+      - ./packages:/app/packages
+    networks:
+      - pm_network
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: apps/dashboard/Dockerfile
+    container_name: pm_dashboard
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-pmuser}:${POSTGRES_PASSWORD:-pmpass}@postgres:5432/${POSTGRES_DB:-prediction_movers}
+    ports:
+      - "8501:8501"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./apps/dashboard:/app/apps/dashboard
+      - ./packages:/app/packages
+    networks:
+      - pm_network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+
+networks:
+  pm_network:
+    driver: bridge
+
