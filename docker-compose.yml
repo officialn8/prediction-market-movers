@@ -59,7 +59,7 @@ services:
       postgres:
         condition: service_healthy
     volumes:
-      - ./apps/dashboard:/app/apps/dashboard
+      # - ./apps/dashboard:/app/apps/dashboard
       - ./packages:/app/packages
     networks:
       - pm_network

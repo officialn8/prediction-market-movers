@@ -111,21 +111,7 @@ async def run_alerts_loop(shutdown: Shutdown) -> None:
             continue
 
 
-async def _amain() -> None:
-    _configure_logging()
-    logger.info("Starting collector…")
 
-    # Initialize DB pool early (fails fast)
-    db = get_db_pool()
-    try:
-        # Optional: run a tiny health query if your db wrapper supports it
-        # db.execute("SELECT 1", fetch=True)
-        pass
-    except Exception:
-        logger.exception("Database connectivity check failed.")
-        sys.exit(1)
-
-    shutdown = Shutdown()
 
 async def run_movers_cache_loop(shutdown: Shutdown) -> None:
     """Background loop for updating movers cache."""

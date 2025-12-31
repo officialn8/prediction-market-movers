@@ -62,20 +62,20 @@ async def update_movers_cache() -> None:
                 token_id = row['token_id']
                 price_now = row['latest_price']
                 price_then = row['old_price']
-                volume = row.get('latest_volume') or Decimal(0) # Not always available in get_top_movers depending on join
+                # Calculate quality score using our new module
+                # We now fetch latest_volume from the query
+                volume = row.get('latest_volume') or Decimal(0)
                 
                 # Re-calculate cleanly
                 move_pp = metrics.calculate_move_pp(price_now, price_then)
                 abs_move_pp = abs(move_pp)
                 
-                # Calculate quality score using our new module
-                # Note: We need volume. If get_top_movers doesn't provide it, we might defaults to 0
-                # The current get_top_movers query doesn't explicitly select volume_24h from latest
-                # Let's assume for this MVP we skip the quality score if volume isn't there, 
-                # or we rely on the implementation updates we'd need to make to get_top_movers.
-                
-                # For safety, let's treat volume as 0 if missing
                 quality_score = metrics.calculate_quality_score(abs_move_pp, volume)
+                
+                # Filter noise: Skip if quality score is too low (e.g. < 1.0)
+                # This prevents low volume garbage from cluttering the top list
+                if quality_score < 1.0:
+                    continue
                 
                 cache_buffer.append({
                     "as_of_ts": now,
@@ -85,7 +85,7 @@ async def update_movers_cache() -> None:
                     "price_then": price_then,
                     "move_pp": move_pp,
                     "abs_move_pp": abs_move_pp,
-                    "rank": rank, # Preliminary rank based on SQL order (pct_change)
+                    "rank": rank, # Preliminary rank
                     "quality_score": quality_score
                 })
             
