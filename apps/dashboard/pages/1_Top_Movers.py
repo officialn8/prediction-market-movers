@@ -192,12 +192,22 @@ def main():
     col1, col2, col3, col4 = st.columns([2, 2, 2, 1])
     
     with col1:
-        timeframe = st.selectbox(
+        # Timeframe options: values are in minutes for sub-hour, hours for 1h+
+        timeframe_options = {
+            "5m": 5,      # 5 minutes
+            "15m": 15,    # 15 minutes
+            "1h": 60,     # 1 hour
+            "6h": 360,    # 6 hours
+            "12h": 720,   # 12 hours
+            "24h": 1440,  # 24 hours
+            "7d": 10080,  # 7 days
+        }
+        timeframe_label = st.selectbox(
             "Timeframe",
-            options=[1, 6, 12, 24, 48, 168],
-            format_func=lambda x: f"{x}h" if x < 24 else f"{x//24}d",
-            index=3,
+            options=list(timeframe_options.keys()),
+            index=2,  # Default to 1h
         )
+        timeframe_minutes = timeframe_options[timeframe_label]
     
     with col2:
         source_filter = st.selectbox(
@@ -220,18 +230,19 @@ def main():
     # Fetch data
     try:
         source = source_filter if source_filter != "All" else None
-        
+
         # Calculate window in seconds
-        window_seconds = timeframe * 3600
-        
-        # Try to fetch from cache first for standard windows (1h, 24h)
-        # Note: Our background job currently supports 1h (3600) and 24h (86400)
+        window_seconds = timeframe_minutes * 60
+
+        # Try to fetch from cache first for supported windows (5m, 15m, 1h, 24h)
         from packages.core.storage.queries import AnalyticsQueries
-        
+
         movers = []
         used_cache = False
-        
-        if window_seconds in [3600, 86400]:
+
+        # Cached windows: 300 (5m), 900 (15m), 3600 (1h), 86400 (24h)
+        cached_windows = [300, 900, 3600, 86400]
+        if window_seconds in cached_windows:
             movers = AnalyticsQueries.get_cached_movers(
                 window_seconds=window_seconds,
                 limit=limit,
@@ -240,11 +251,13 @@ def main():
             )
             if movers:
                 used_cache = True
-        
+
         # Fallback to raw SQL if cache miss or non-standard window
         if not movers:
+            # Convert to hours for the query (minimum 1 hour)
+            hours = max(1, timeframe_minutes // 60)
             movers = MarketQueries.get_top_movers(
-                hours=timeframe,
+                hours=hours,
                 limit=limit,
                 source=source,
                 direction=direction,

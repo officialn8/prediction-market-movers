@@ -9,8 +9,65 @@ from packages.core.analytics import metrics
 
 logger = logging.getLogger(__name__)
 
-# Windows to precompute: 1h, 24h
-WINDOWS = [3600, 86400]
+# Windows to precompute: 5m, 15m, 1h, 24h
+WINDOWS = [300, 900, 3600, 86400]
+
+
+def get_short_window_movers(db, window_seconds: int, limit: int = 1000) -> list[dict]:
+    """
+    Get price movers for sub-hour windows (5m, 15m).
+    Uses seconds-based interval instead of hours.
+    """
+    query = """
+        WITH latest AS (
+            SELECT DISTINCT ON (token_id)
+                token_id,
+                ts as latest_ts,
+                price as latest_price,
+                volume_24h as latest_volume
+            FROM snapshots
+            ORDER BY token_id, ts DESC
+        ),
+        historical AS (
+            SELECT DISTINCT ON (token_id)
+                token_id,
+                price as old_price
+            FROM snapshots
+            WHERE ts <= NOW() - (%s * INTERVAL '1 second')
+            ORDER BY token_id, ts DESC
+        ),
+        changes AS (
+            SELECT
+                l.token_id,
+                l.latest_ts,
+                l.latest_price,
+                l.latest_volume,
+                h.old_price,
+                CASE
+                    WHEN h.old_price > 0 THEN
+                        ROUND(((l.latest_price - h.old_price) / h.old_price * 100)::numeric, 2)
+                    ELSE NULL
+                END as pct_change
+            FROM latest l
+            JOIN historical h ON l.token_id = h.token_id
+        )
+        SELECT
+            c.*,
+            mt.market_id,
+            mt.outcome,
+            m.title,
+            m.source,
+            m.category,
+            m.url
+        FROM changes c
+        JOIN market_tokens mt ON c.token_id = mt.token_id
+        JOIN markets m ON mt.market_id = m.market_id
+        WHERE m.status = 'active'
+          AND c.pct_change IS NOT NULL
+        ORDER BY ABS(c.pct_change) DESC
+        LIMIT %s
+    """
+    return db.execute(query, (window_seconds, limit), fetch=True) or []
 
 async def update_movers_cache() -> None:
     """
@@ -50,11 +107,19 @@ async def update_movers_cache() -> None:
             
             # Hybrid approach: Get the raw price changes from SQL, then rank in Python
             
-            raw_movers = MarketQueries.get_top_movers(
-                hours=window // 3600, 
-                limit=1000, # Fetch broad set
-                direction="both"
-            )
+            # For sub-hour windows, we need to use a different approach
+            # get_top_movers expects hours, so we'll query directly for short windows
+            hours_param = max(1, window // 3600)  # Minimum 1 hour for the query
+
+            if window < 3600:
+                # For short windows (5m, 15m), use custom query
+                raw_movers = get_short_window_movers(db, window, limit=1000)
+            else:
+                raw_movers = MarketQueries.get_top_movers(
+                    hours=hours_param,
+                    limit=1000,  # Fetch broad set
+                    direction="both"
+                )
             
             cache_buffer = []
             

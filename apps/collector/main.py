@@ -135,17 +135,36 @@ async def run_movers_cache_loop(shutdown: Shutdown) -> None:
 async def run_rollups_loop(shutdown: Shutdown) -> None:
     """Background loop for OHLC rollups and retention."""
     from apps.collector.jobs.rollups import run_ohlc_rollups
-    
+
     logger.info("Rollups loop starting (interval=60s)")
     while not shutdown.is_set:
         try:
             await run_ohlc_rollups()
         except Exception:
             logger.exception("Error in rollups loop")
-        
+
         try:
             # Run every minute
             await asyncio.wait_for(shutdown.wait(), timeout=60)
+            break
+        except asyncio.TimeoutError:
+            continue
+
+
+async def run_user_alerts_loop(shutdown: Shutdown) -> None:
+    """Background loop for checking user-defined custom alerts."""
+    from apps.collector.jobs.user_alerts import check_user_alerts
+
+    logger.info("User alerts loop starting (interval=30s)")
+    while not shutdown.is_set:
+        try:
+            await check_user_alerts()
+        except Exception:
+            logger.exception("Error in user alerts loop")
+
+        try:
+            # Check every 30 seconds for responsive notifications
+            await asyncio.wait_for(shutdown.wait(), timeout=30)
             break
         except asyncio.TimeoutError:
             continue
@@ -184,6 +203,7 @@ async def _amain() -> None:
         bg_tasks.append(asyncio.create_task(run_alerts_loop(shutdown)))
         bg_tasks.append(asyncio.create_task(run_movers_cache_loop(shutdown)))
         bg_tasks.append(asyncio.create_task(run_rollups_loop(shutdown)))
+        bg_tasks.append(asyncio.create_task(run_user_alerts_loop(shutdown)))
 
     try:
         if mode == "simulated":
