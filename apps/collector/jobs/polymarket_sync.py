@@ -92,6 +92,7 @@ def sync_markets_and_prices(adapter: PolymarketAdapter, max_markets: int = MAX_M
                 source_id=pm_market.condition_id,
                 title=pm_market.title,
                 category=pm_market.category,
+                end_date=pm_market.end_date,
                 status="active" if pm_market.active and not pm_market.closed else "closed",
                 url=pm_market.url,
             )

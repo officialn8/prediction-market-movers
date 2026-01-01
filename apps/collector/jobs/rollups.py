@@ -31,11 +31,7 @@ async def run_ohlc_rollups() -> None:
                 MAX(price) as high,
                 MIN(price) as low,
                 (ARRAY_AGG(price ORDER BY ts DESC))[1] as close,
-                MAX(volume_24h) as volume -- Approximate volume taking max since it is cumulative usually? 
-                                          -- Actually volume_24h is a rolling 24h vol. Creating "candle volume" from it is tricky.
-                                          -- For now, let's just store the max volume_24h seen in that bucket as a proxy, 
-                                          -- or 0 if we assume it's delta.
-                                          -- Context: Polymarket API gives 24h volume.
+                MAX(volume_24h) as volume -- Max 24h volume seen in bucket
             FROM snapshots
             WHERE ts >= NOW() - INTERVAL '2 hours'
             GROUP BY token_id, 2
@@ -47,8 +43,34 @@ async def run_ohlc_rollups() -> None:
         """
         db.execute(query_1m)
         
-        # 2. Generate 1h candles from 1m candles (hierarchical rollup)
-        # Much more efficient than going back to snapshots
+        # 2. Generate 5m candles from 1m candles
+        query_5m = """
+            INSERT INTO ohlc_5m (token_id, bucket_ts, open, high, low, close, volume)
+            SELECT 
+                token_id,
+                DATE_TRUNC('hour', bucket_ts) + 
+                INTERVAL '5 min' * FLOOR(EXTRACT(MINUTE FROM bucket_ts) / 5) as bucket,
+                (ARRAY_AGG(open ORDER BY bucket_ts ASC))[1] as open,
+                MAX(high) as high,
+                MIN(low) as low,
+                (ARRAY_AGG(close ORDER BY bucket_ts DESC))[1] as close,
+                MAX(volume) as volume -- Max 24h vol in this 5m bucket
+            FROM ohlc_1m
+            WHERE bucket_ts >= NOW() - INTERVAL '2 hours'
+            GROUP BY token_id, 2
+            ON CONFLICT (token_id, bucket_ts) DO UPDATE SET
+                high = GREATEST(ohlc_5m.high, EXCLUDED.high),
+                low = LEAST(ohlc_5m.low, EXCLUDED.low),
+                close = EXCLUDED.close,
+                volume = EXCLUDED.volume;
+        """
+        db.execute(query_5m)
+
+        # 3. Generate 1h candles from 5m (or 1m) candles
+        # Using 5m as source is slightly more efficient if populated, but 1m is fine.
+        # Let's keep 1m as source for 1h to avoid dependency on 5m success, or use 1m as source for both.
+        # Existing logic used 1m. Let's stick to 1m -> 1h for simplicity.
+        
         query_1h = """
             INSERT INTO ohlc_1h (token_id, bucket_ts, open, high, low, close, volume)
             SELECT 
@@ -58,7 +80,7 @@ async def run_ohlc_rollups() -> None:
                 MAX(high) as high,
                 MIN(low) as low,
                 (ARRAY_AGG(close ORDER BY bucket_ts DESC))[1] as close,
-                MAX(volume) as volume
+                MAX(volume) as volume -- Max 24h vol in this 1h bucket
             FROM ohlc_1m
             WHERE bucket_ts >= NOW() - INTERVAL '4 hours'
             GROUP BY token_id, 2
@@ -70,11 +92,13 @@ async def run_ohlc_rollups() -> None:
         """
         db.execute(query_1h)
         
-        # 3. Retention Policy
-        # Call the procedure we defined in migration 003
-        db.execute("CALL clean_old_snapshots()")
+        # 4. Retention Policy (Hourly check)
+        # Run cleanup only at the top of the hour to save resources
+        if datetime.now().minute == 0:
+            logger.info("Running hourly retention cleanup...")
+            db.execute("CALL clean_old_snapshots()")
         
-        logger.info("OHLC rollups and retention complete.")
+        logger.info("OHLC rollups complete.")
         
     except Exception as e:
         logger.exception("Failed to run OHLC rollups")
