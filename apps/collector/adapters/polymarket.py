@@ -318,13 +318,26 @@ class PolymarketAdapter:
         
         # Fetch from CLOB API in batches
         batch_size = 50
-        for i in range(0, len(token_ids), batch_size):
-            batch = token_ids[i:i + batch_size]
-            batch_prices = self._fetch_clob_prices(batch)
-            prices.update(batch_prices)
+        try:
+            for i in range(0, len(token_ids), batch_size):
+                batch = token_ids[i:i + batch_size]
+                batch_prices = self._fetch_clob_prices(batch)
+                prices.update(batch_prices)
+        except Exception as e:
+            logger.error(f"Error in batch price fetch loop: {e}")
+            # Return partial results if we strictly need to, or just whatever we have.
+            # We continue to return what we have.
+            pass
         
         logger.info(f"Fetched prices for {len(prices)}/{len(token_ids)} tokens")
         return prices
+
+    def fetch_price_single(self, token_id: str) -> Optional[TokenPrice]:
+        """
+        Fetch price for a single token (debugging/verification).
+        """
+        prices = self._fetch_clob_prices([token_id])
+        return prices.get(token_id)
     
     def _fetch_clob_prices(self, token_ids: list[str], side: str = "BUY") -> dict[str, TokenPrice]:
         """Fetch prices from CLOB API using POST with correct payload format."""
@@ -343,23 +356,36 @@ class PolymarketAdapter:
         prices = {}
         
         # Response format is likely a list or dict mapping token_id -> price
+        # Observed format: {"token_id": {"BUY": "0.55"}}
         if isinstance(data, dict):
-            for token_id, price_str in data.items():
+            for token_id, val in data.items():
                 try:
+                    price_str = val
+                    if isinstance(val, dict):
+                        price_str = val.get(side)
+                    
+                    if price_str is None:
+                        continue
+                        
                     price = float(price_str)
                     price = max(0.0, min(1.0, price))
                     prices[token_id] = TokenPrice(token_id=token_id, price=price)
                 except (ValueError, TypeError):
                     continue
         elif isinstance(data, list):
-            # Handle list response format
+            # Handle list response format (older API versions sometimes did this)
             for item in data:
                 if isinstance(item, dict):
                     token_id = item.get("token_id")
-                    price_str = item.get("price")
-                    if token_id and price_str is not None:
+                    val = item.get("price")
+                    
+                    # It might be nested here too? Unlikely for list format but let's be safe
+                    if isinstance(val, dict):
+                        val = val.get(side)
+                        
+                    if token_id and val is not None:
                         try:
-                            price = float(price_str)
+                            price = float(val)
                             price = max(0.0, min(1.0, price))
                             prices[token_id] = TokenPrice(token_id=token_id, price=price)
                         except (ValueError, TypeError):

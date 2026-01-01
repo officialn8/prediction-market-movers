@@ -535,16 +535,33 @@ class AnalyticsQueries:
         return db.execute(query, (limit,), fetch=True) or []
 
     @staticmethod
-    def get_recent_alert_for_token(token_id: UUID, window_minutes: int = 15) -> Optional[dict]:
-        """Check if an alert was generated for this token recently."""
+    def get_recent_alert_for_token(
+        token_id: UUID, 
+        window_seconds: int = 3600,
+        lookback_minutes: int = 30
+    ) -> Optional[dict]:
+        """
+        Check if an alert was generated for this token + window recently.
+        
+        Args:
+            token_id: The token UUID
+            window_seconds: The alert window size (e.g. 3600 for 1h movers)
+            lookback_minutes: How far back to check for existing alerts (cooldown)
+        """
         db = get_db_pool()
         query = """
             SELECT * FROM alerts 
             WHERE token_id = %s 
+              AND window_seconds = %s
               AND created_at > NOW() - (%s * INTERVAL '1 minute')
+            ORDER BY created_at DESC
             LIMIT 1
         """
-        result = db.execute(query, (str(token_id), window_minutes), fetch=True)
+        result = db.execute(
+            query, 
+            (str(token_id), window_seconds, lookback_minutes), 
+            fetch=True
+        )
         return result[0] if result else None
 
     @staticmethod
