@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from decimal import Decimal
+from uuid import UUID
 
 from packages.core.storage.queries import AnalyticsQueries, MarketQueries
 from packages.core.settings import settings
@@ -31,41 +32,73 @@ async def run_alerts_check() -> None:
         
         for mover in movers:
             try:
-                move_pp = mover["pct_change"]
+                # Type safety
+                token_id = UUID(str(mover["token_id"]))
+                move_pp = Decimal(str(mover["pct_change"]))
                 abs_move = abs(move_pp)
                 
                 # Check thresholds
                 if abs_move < ALERT_THRESHOLD_PP:
                     continue
-                    
-                # TODO: Check volume if available in mover dict (it's not currently joined in get_top_movers explicitly as volume_24h, 
-                # but we can fetch it or trust the mover quality)
-                # For now, just alert on price.
                 
-                token_id = mover["token_id"]
+                # Quality Gates
+                # 1. Volume
+                vol = mover.get("latest_volume") or mover.get("volume_24h")
+                if vol is not None:
+                    try:
+                        if Decimal(str(vol)) < MIN_VOLUME_FOR_ALERT:
+                            # logger.debug(f"Skipping {mover['title']}: low volume {vol}")
+                            continue
+                    except:
+                        pass
+                
+                # 2. Spread (if available)
+                spread = mover.get("spread")
+                if spread is not None:
+                     try:
+                        if float(spread) > 0.05:
+                            continue
+                     except:
+                        pass
+
                 market_title = mover["title"]
                 outcome = mover["outcome"]
                 
-                # Deduplication: Check if we alerted on this token recently (e.g. last 15 mins)
+                # Deduplication & High-Watermark
+                # Check if we alerted on this token regarding this window recently (last 30 mins)
+                window_seconds_val = ALERT_WINDOW_HOURS * 3600
                 existing = AnalyticsQueries.get_recent_alert_for_token(
                     token_id=token_id, 
-                    window_minutes=15
+                    window_seconds=window_seconds_val,
+                    lookback_minutes=30
                 )
+                
                 if existing:
-                    continue
+                    # High-watermark check
+                    # Only alert again if the new move is significantly larger (>20% larger than previous alert)
+                    try:
+                        last_move_pp = Decimal(str(existing["move_pp"]))
+                        # If current move is not at least 20% larger than the last reported move, skip
+                        # e.g. last was 10%, current is 11% -> skip. current is 13% -> alert.
+                        if abs_move <= abs(last_move_pp) * Decimal("1.2"):
+                            continue
+                    except Exception:
+                        # If can't parse last move, safer to skip or alert? 
+                        # Let's skip to avoid spam if DB is messy
+                        continue
                 
                 sign = "+" if move_pp > 0 else ""
-                reason = f"{market_title} ({outcome}): {sign}{move_pp:.2f}% in last hour"
+                reason = f"{market_title} ({outcome}): {sign}{move_pp:.2f}% in last {ALERT_WINDOW_HOURS}h"
                 
                 AnalyticsQueries.insert_alert(
                     token_id=token_id,
-                    window_seconds=ALERT_WINDOW_HOURS * 3600,
+                    window_seconds=window_seconds_val,
                     move_pp=move_pp,
                     threshold_pp=ALERT_THRESHOLD_PP,
                     reason=reason
                 )
                 alerts_generated += 1
-                logger.info(f"Generated alert: {reason}")
+                logger.info(f"Generated alert: {reason} (Vol: {vol}, Move: {move_pp}%)")
                 
             except Exception as e:
                 logger.error(f"Error processing mover {mover.get('token_id')}: {e}")
