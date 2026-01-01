@@ -29,6 +29,7 @@ class MarketQueries:
         source_id: str,
         title: str,
         category: Optional[str] = None,
+        end_date: Optional[str] = None,
         status: str = "active",
         url: Optional[str] = None,
     ) -> dict:
@@ -40,12 +41,13 @@ class MarketQueries:
         """
         db = get_db_pool()
         query = """
-            INSERT INTO markets (source, source_id, title, category, status, url)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            INSERT INTO markets (source, source_id, title, category, end_date, status, url)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (source, source_id) 
             DO UPDATE SET 
                 title = EXCLUDED.title,
                 category = EXCLUDED.category,
+                end_date = EXCLUDED.end_date,
                 status = EXCLUDED.status,
                 url = EXCLUDED.url,
                 updated_at = NOW()
@@ -53,7 +55,7 @@ class MarketQueries:
         """
         result = db.execute(
             query,
-            (source, source_id, title, category, status, url),
+            (source, source_id, title, category, end_date, status, url),
             fetch=True,
         )
         return result[0] if result else {}
@@ -281,6 +283,16 @@ class MarketQueries:
         else:
             direction_filter = ""
             order = "ABS(pct_change) DESC"
+        
+        # New: Filter out markets expiring very soon (or active now but ending)
+        # This removes "convergence" noise (e.g. 2025 markets on 12/31/2025)
+        # We also might want to filter markets that *just* expired but are still marked active?
+        # Let's say we ignore markets where end_date < NOW() + 24 hours
+        # Actually simplest heuristic for "active movers" is probably ignoring markets ending very soon.
+        # Let's filter markets ending in next 48 hours to be safe? Or user said "not include 2025 market movements" on 12/31.
+        # That means markets ending in 2025 should be excluded? Or specifically markets ending *today*?
+        # A conservative filter is: AND (m.end_date IS NULL OR m.end_date > NOW() + INTERVAL '24 hours')
+        expiry_filter = "AND (m.end_date IS NULL OR m.end_date > NOW() + INTERVAL '24 hours')"
 
         query = f"""
             WITH latest AS (
@@ -331,6 +343,7 @@ class MarketQueries:
               {source_filter}
               {category_filter}
               {direction_filter}
+              {expiry_filter}
             ORDER BY {order}
             LIMIT %s
         """
@@ -522,16 +535,33 @@ class AnalyticsQueries:
         return db.execute(query, (limit,), fetch=True) or []
 
     @staticmethod
-    def get_recent_alert_for_token(token_id: UUID, window_minutes: int = 15) -> Optional[dict]:
-        """Check if an alert was generated for this token recently."""
+    def get_recent_alert_for_token(
+        token_id: UUID, 
+        window_seconds: int = 3600,
+        lookback_minutes: int = 30
+    ) -> Optional[dict]:
+        """
+        Check if an alert was generated for this token + window recently.
+        
+        Args:
+            token_id: The token UUID
+            window_seconds: The alert window size (e.g. 3600 for 1h movers)
+            lookback_minutes: How far back to check for existing alerts (cooldown)
+        """
         db = get_db_pool()
         query = """
             SELECT * FROM alerts 
             WHERE token_id = %s 
+              AND window_seconds = %s
               AND created_at > NOW() - (%s * INTERVAL '1 minute')
+            ORDER BY created_at DESC
             LIMIT 1
         """
-        result = db.execute(query, (str(token_id), window_minutes), fetch=True)
+        result = db.execute(
+            query, 
+            (str(token_id), window_seconds, lookback_minutes), 
+            fetch=True
+        )
         return result[0] if result else None
 
     @staticmethod

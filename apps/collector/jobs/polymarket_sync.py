@@ -38,6 +38,7 @@ class SyncState:
     # source_token_id -> our token_id (UUID)
     source_to_db_token: Dict[str, UUID] = field(default_factory=dict)
     last_market_sync: Optional[float] = None
+    last_gamma_markets: Optional[list] = None  # Cache of recent markets
     markets_count: int = 0
     tokens_count: int = 0
 
@@ -72,6 +73,10 @@ def sync_markets_and_prices(adapter: PolymarketAdapter, max_markets: int = MAX_M
     # Fetch markets from API (includes prices!)
     markets = adapter.fetch_all_markets(max_markets=max_markets, active=True)
     
+    # Update cache
+    state.last_gamma_markets = markets
+    state.last_market_sync = time.time()
+    
     if not markets:
         logger.warning("No markets fetched from Polymarket")
         return 0, 0
@@ -92,6 +97,7 @@ def sync_markets_and_prices(adapter: PolymarketAdapter, max_markets: int = MAX_M
                 source_id=pm_market.condition_id,
                 title=pm_market.title,
                 category=pm_market.category,
+                end_date=pm_market.end_date,
                 status="active" if pm_market.active and not pm_market.closed else "closed",
                 url=pm_market.url,
             )
@@ -188,8 +194,22 @@ def sync_prices(adapter: PolymarketAdapter, use_clob: bool = True) -> int:
     
     if use_clob:
         # Try CLOB API for real-time prices
+        # Instrumentation: Log sample of tokens we are requesting
+        sample_ids = source_token_ids[:3] if source_token_ids else []
+        logger.debug(f"Requesting CLOB prices for {len(source_token_ids)} tokens. Sample: {sample_ids}")
+        
         prices = adapter.fetch_prices_batch(source_token_ids)
         
+        # Instrumentation: Check response count
+        if not prices:
+            logger.warning(
+                f"CLOB returned 0 prices for {len(source_token_ids)} requested tokens. "
+                f"Likely identifier mismatch or API issue. Endpoint: CLOB/prices"
+            )
+        else:
+            if len(prices) < len(source_token_ids) * 0.5:
+                 logger.warning(f"CLOB returned partial prices: {len(prices)}/{len(source_token_ids)}")
+
         if prices:
             for source_token_id, token_price in prices.items():
                 db_token_id = state.source_to_db_token.get(source_token_id)
@@ -202,9 +222,24 @@ def sync_prices(adapter: PolymarketAdapter, use_clob: bool = True) -> int:
                     })
     
     # Fallback to Gamma API if CLOB failed or returned no prices
+    # Logic: If use_clob was True but snapshots is empty, we failed.
+    # If use_clob was False, we intended to fall back.
     if not snapshots:
-        logger.info("CLOB returned no prices, falling back to Gamma API")
-        markets = adapter.fetch_all_markets(max_markets=MAX_MARKETS, active=True)
+        logger.info("Using Gamma API for prices (fallback or primary)")
+        
+        # Use cached markets if available and recent (10 mins)
+        markets = state.last_gamma_markets
+        is_stale = False
+        if state.last_market_sync:
+            is_stale = (time.time() - state.last_market_sync) > 600  # 10 mins
+            
+        if not markets or is_stale:
+            logger.info("Gamma cache empty or stale, fetching fresh markets")
+            markets = adapter.fetch_all_markets(max_markets=MAX_MARKETS, active=True)
+            state.last_gamma_markets = markets
+            state.last_market_sync = time.time()
+        else:
+            logger.info(f"Using cached Gamma markets ({len(markets)} markets)")
         
         if markets:
             for pm_market in markets:
