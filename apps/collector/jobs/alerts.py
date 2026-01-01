@@ -47,8 +47,12 @@ async def run_alerts_check() -> None:
                 outcome = mover["outcome"]
                 
                 # Deduplication: Check if we alerted on this token recently (e.g. last 15 mins)
-                # For MVP Phase 2, we skip complex dedupe and just insert. 
-                # Ideally we'd query: SELECT 1 FROM alerts WHERE token_id=%s AND created_at > NOW() - INTERVAL '15 minutes'
+                existing = AnalyticsQueries.get_recent_alert_for_token(
+                    token_id=token_id, 
+                    window_minutes=15
+                )
+                if existing:
+                    continue
                 
                 sign = "+" if move_pp > 0 else ""
                 reason = f"{market_title} ({outcome}): {sign}{move_pp:.2f}% in last hour"
