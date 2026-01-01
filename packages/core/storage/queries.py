@@ -261,6 +261,7 @@ class MarketQueries:
         hours: int = 24,
         limit: int = 20,
         source: Optional[str] = None,
+        category: Optional[str] = None,
         direction: str = "both",
     ) -> list[dict]:
         """
@@ -269,6 +270,7 @@ class MarketQueries:
         db = get_db_pool()
 
         source_filter = "AND m.source = %s" if source else ""
+        category_filter = "AND m.category = %s" if category else ""
 
         if direction == "gainers":
             direction_filter = "AND pct_change > 0"
@@ -327,6 +329,7 @@ class MarketQueries:
             WHERE m.status = 'active'
               AND c.pct_change IS NOT NULL
               {source_filter}
+              {category_filter}
               {direction_filter}
             ORDER BY {order}
             LIMIT %s
@@ -335,9 +338,60 @@ class MarketQueries:
         params = [hours]
         if source:
             params.append(source)
+        if category:
+            params.append(category)
         params.append(limit)
 
         return db.execute(query, tuple(params), fetch=True) or []
+
+    @staticmethod
+    def get_category_stats(hours: int = 24) -> list[dict]:
+        """
+        Get aggregated statistics by category.
+        """
+        db = get_db_pool()
+        
+        # We reuse the logic from top movers to get moves, but aggregate
+        query = f"""
+            WITH latest AS (
+                SELECT DISTINCT ON (token_id)
+                    token_id,
+                    price as latest_price,
+                    volume_24h as latest_volume
+                FROM snapshots
+                ORDER BY token_id, ts DESC
+            ),
+            historical AS (
+                SELECT DISTINCT ON (token_id)
+                    token_id,
+                    price as old_price
+                FROM snapshots
+                WHERE ts <= NOW() - (%s * INTERVAL '1 hour')
+                ORDER BY token_id, ts DESC
+            ),
+            changes AS (
+                SELECT
+                    l.token_id,
+                    l.latest_volume,
+                    ABS((l.latest_price - h.old_price) / h.old_price * 100) as abs_change
+                FROM latest l
+                JOIN historical h ON l.token_id = h.token_id
+                WHERE h.old_price > 0
+            )
+            SELECT
+                m.category,
+                COUNT(DISTINCT m.market_id) as market_count,
+                AVG(c.abs_change) as avg_abs_move,
+                SUM(c.latest_volume) as total_volume
+            FROM changes c
+            JOIN market_tokens mt ON c.token_id = mt.token_id
+            JOIN markets m ON mt.market_id = m.market_id
+            WHERE m.status = 'active'
+            GROUP BY m.category
+            HAVING COUNT(DISTINCT m.market_id) > 2
+            ORDER BY avg_abs_move DESC
+        """
+        return db.execute(query, (hours,), fetch=True) or []
     
     @staticmethod
     def get_market_with_tokens_and_latest_prices(market_id: UUID) -> Optional[dict]:
@@ -466,6 +520,19 @@ class AnalyticsQueries:
             LIMIT %s
         """
         return db.execute(query, (limit,), fetch=True) or []
+
+    @staticmethod
+    def get_recent_alert_for_token(token_id: UUID, window_minutes: int = 15) -> Optional[dict]:
+        """Check if an alert was generated for this token recently."""
+        db = get_db_pool()
+        query = """
+            SELECT * FROM alerts 
+            WHERE token_id = %s 
+              AND created_at > NOW() - (%s * INTERVAL '1 minute')
+            LIMIT 1
+        """
+        result = db.execute(query, (str(token_id), window_minutes), fetch=True)
+        return result[0] if result else None
 
     @staticmethod
     def get_cached_movers(
