@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
 from packages.core.storage import get_db_pool
-from packages.core.storage.queries import MarketQueries
+from packages.core.storage.queries import MarketQueries, OHLCQueries
 
 st.set_page_config(
     page_title="Market Detail | PM Movers",
@@ -62,29 +62,65 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-def create_price_chart(snapshots: list[dict], token_outcome: str) -> go.Figure:
-    """Create a price chart for a token."""
-    if not snapshots:
+def create_price_chart(data: list[dict], token_outcome: str, use_ohlc: bool = False) -> go.Figure:
+    """
+    Create a price chart for a token.
+    Supports both raw snapshots (price column) and OHLC candles (open/high/low/close columns).
+    """
+    if not data:
         return None
-    
-    df = pd.DataFrame(snapshots)
+
+    df = pd.DataFrame(data)
     df["ts"] = pd.to_datetime(df["ts"])
     df = df.sort_values("ts")
-    
+
     color = "#00d4aa" if token_outcome == "YES" else "#ff4757"
-    
+
     fig = go.Figure()
-    
-    fig.add_trace(go.Scatter(
-        x=df["ts"],
-        y=df["price"],
-        mode="lines",
-        name=f"{token_outcome} Price",
-        line=dict(color=color, width=2),
-        fill="tozeroy",
-        fillcolor=f"rgba({','.join(str(int(color[i:i+2], 16)) for i in (1, 3, 5))}, 0.1)",
-    ))
-    
+
+    # Determine price column based on data type
+    if use_ohlc and "close" in df.columns:
+        # OHLC candle data - use close price for line, show high/low as range
+        fig.add_trace(go.Scatter(
+            x=df["ts"],
+            y=df["high"],
+            mode="lines",
+            name="High",
+            line=dict(color=color, width=1, dash="dot"),
+            opacity=0.3,
+            showlegend=False,
+        ))
+        fig.add_trace(go.Scatter(
+            x=df["ts"],
+            y=df["low"],
+            mode="lines",
+            name="Low",
+            line=dict(color=color, width=1, dash="dot"),
+            fill="tonexty",
+            fillcolor=f"rgba({','.join(str(int(color[i:i+2], 16)) for i in (1, 3, 5))}, 0.1)",
+            opacity=0.3,
+            showlegend=False,
+        ))
+        fig.add_trace(go.Scatter(
+            x=df["ts"],
+            y=df["close"],
+            mode="lines",
+            name=f"{token_outcome} Close",
+            line=dict(color=color, width=2),
+        ))
+    else:
+        # Raw snapshot data
+        price_col = "price" if "price" in df.columns else "close"
+        fig.add_trace(go.Scatter(
+            x=df["ts"],
+            y=df[price_col],
+            mode="lines",
+            name=f"{token_outcome} Price",
+            line=dict(color=color, width=2),
+            fill="tozeroy",
+            fillcolor=f"rgba({','.join(str(int(color[i:i+2], 16)) for i in (1, 3, 5))}, 0.1)",
+        ))
+
     fig.update_layout(
         template="plotly_dark",
         paper_bgcolor="rgba(0,0,0,0)",
@@ -104,7 +140,7 @@ def create_price_chart(snapshots: list[dict], token_outcome: str) -> go.Figure:
         hovermode="x unified",
         showlegend=False,
     )
-    
+
     return fig
 
 
@@ -217,17 +253,37 @@ def main():
     
     # Fetch and display charts for each token
     if tokens and tokens[0]:
+        # Show data source info based on timeframe
+        if hours >= 48:
+            st.caption("📊 Using 1-hour OHLC candles for faster loading")
+        elif hours >= 6:
+            st.caption("📊 Using 1-minute OHLC candles")
+        else:
+            st.caption("📊 Using raw price snapshots")
+
         for token in tokens:
             if token and token.get("token_id"):
                 st.markdown(f"**{token.get('outcome', 'Unknown')} Token**")
-                
-                snapshots = MarketQueries.get_snapshots_range(
-                    token_id=token["token_id"],
-                    start_ts=start_ts,
-                )
-                
-                if snapshots:
-                    fig = create_price_chart(snapshots, token.get("outcome", "YES"))
+
+                # Use OHLC for longer timeframes (>= 6 hours)
+                use_ohlc = hours >= 6
+
+                if use_ohlc:
+                    # Use OHLC queries for efficiency
+                    data = OHLCQueries.get_candles_for_timeframe(
+                        token_id=token["token_id"],
+                        start_ts=start_ts,
+                        hours=hours,
+                    )
+                else:
+                    # Use raw snapshots for short timeframes
+                    data = MarketQueries.get_snapshots_range(
+                        token_id=token["token_id"],
+                        start_ts=start_ts,
+                    )
+
+                if data:
+                    fig = create_price_chart(data, token.get("outcome", "YES"), use_ohlc=use_ohlc)
                     if fig:
                         st.plotly_chart(fig, use_container_width=True)
                 else:

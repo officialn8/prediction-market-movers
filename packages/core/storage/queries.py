@@ -590,6 +590,267 @@ class AnalyticsQueries:
         if source:
             params.append(source)
         params.append(limit)
-        
+
         return db.execute(query, tuple(params), fetch=True) or []
 
+
+@dataclass
+class UserAlertsQueries:
+    """
+    SQL query methods for user-defined custom alerts.
+    """
+
+    @staticmethod
+    def create_user_alert(
+        session_id: str,
+        market_id: UUID,
+        token_id: UUID,
+        condition_type: str,
+        threshold: float,
+        window_seconds: Optional[int] = None,
+        notify_once: bool = False,
+    ) -> dict:
+        """Create a new user-defined alert."""
+        db = get_db_pool()
+        query = """
+            INSERT INTO user_alerts (
+                session_id, market_id, token_id,
+                condition_type, threshold, window_seconds, notify_once
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """
+        result = db.execute(
+            query,
+            (session_id, str(market_id), str(token_id), condition_type, threshold, window_seconds, notify_once),
+            fetch=True,
+        )
+        return result[0] if result else {}
+
+    @staticmethod
+    def get_user_alerts(session_id: str, active_only: bool = True) -> list[dict]:
+        """Get all alerts for a user session."""
+        db = get_db_pool()
+        active_filter = "AND ua.is_active = true" if active_only else ""
+        query = f"""
+            SELECT
+                ua.*,
+                m.title as market_title,
+                m.source,
+                mt.outcome,
+                (SELECT price FROM snapshots WHERE token_id = ua.token_id ORDER BY ts DESC LIMIT 1) as current_price
+            FROM user_alerts ua
+            JOIN markets m ON ua.market_id = m.market_id
+            JOIN market_tokens mt ON ua.token_id = mt.token_id
+            WHERE ua.session_id = %s
+              {active_filter}
+            ORDER BY ua.created_at DESC
+        """
+        return db.execute(query, (session_id,), fetch=True) or []
+
+    @staticmethod
+    def get_active_user_alerts() -> list[dict]:
+        """Get all active user alerts (for background checking)."""
+        db = get_db_pool()
+        query = """
+            SELECT
+                ua.*,
+                m.title as market_title,
+                mt.outcome,
+                (SELECT price FROM snapshots WHERE token_id = ua.token_id ORDER BY ts DESC LIMIT 1) as current_price
+            FROM user_alerts ua
+            JOIN markets m ON ua.market_id = m.market_id
+            JOIN market_tokens mt ON ua.token_id = mt.token_id
+            WHERE ua.is_active = true
+        """
+        return db.execute(query, fetch=True) or []
+
+    @staticmethod
+    def delete_user_alert(alert_id: UUID, session_id: str) -> bool:
+        """Delete a user alert (verifying ownership via session_id)."""
+        db = get_db_pool()
+        query = """
+            DELETE FROM user_alerts
+            WHERE alert_id = %s AND session_id = %s
+            RETURNING alert_id
+        """
+        result = db.execute(query, (str(alert_id), session_id), fetch=True)
+        return bool(result)
+
+    @staticmethod
+    def deactivate_user_alert(alert_id: UUID) -> bool:
+        """Deactivate an alert (called when notify_once triggers)."""
+        db = get_db_pool()
+        query = """
+            UPDATE user_alerts
+            SET is_active = false
+            WHERE alert_id = %s
+            RETURNING alert_id
+        """
+        result = db.execute(query, (str(alert_id),), fetch=True)
+        return bool(result)
+
+    @staticmethod
+    def record_alert_trigger(alert_id: UUID, current_price: float, threshold: float, message: str) -> dict:
+        """Record that an alert was triggered and create notification."""
+        db = get_db_pool()
+        # Update the alert
+        db.execute("""
+            UPDATE user_alerts
+            SET last_triggered = NOW(), trigger_count = trigger_count + 1
+            WHERE alert_id = %s
+        """, (str(alert_id),))
+
+        # Create notification
+        query = """
+            INSERT INTO user_alert_notifications (
+                user_alert_id, current_price, threshold_price, message
+            )
+            VALUES (%s, %s, %s, %s)
+            RETURNING *
+        """
+        result = db.execute(query, (str(alert_id), current_price, threshold, message), fetch=True)
+        return result[0] if result else {}
+
+    @staticmethod
+    def get_user_notifications(session_id: str, unacknowledged_only: bool = True, limit: int = 50) -> list[dict]:
+        """Get notifications for a user's alerts."""
+        db = get_db_pool()
+        ack_filter = "AND n.acknowledged = false" if unacknowledged_only else ""
+        query = f"""
+            SELECT
+                n.*,
+                ua.condition_type,
+                ua.threshold,
+                m.title as market_title,
+                mt.outcome
+            FROM user_alert_notifications n
+            JOIN user_alerts ua ON n.user_alert_id = ua.alert_id
+            JOIN markets m ON ua.market_id = m.market_id
+            JOIN market_tokens mt ON ua.token_id = mt.token_id
+            WHERE ua.session_id = %s
+              {ack_filter}
+            ORDER BY n.triggered_at DESC
+            LIMIT %s
+        """
+        return db.execute(query, (session_id, limit), fetch=True) or []
+
+    @staticmethod
+    def acknowledge_notification(notification_id: UUID) -> bool:
+        """Mark a notification as acknowledged."""
+        db = get_db_pool()
+        query = """
+            UPDATE user_alert_notifications
+            SET acknowledged = true
+            WHERE notification_id = %s
+            RETURNING notification_id
+        """
+        result = db.execute(query, (str(notification_id),), fetch=True)
+        return bool(result)
+
+    @staticmethod
+    def acknowledge_all_notifications(session_id: str) -> int:
+        """Acknowledge all notifications for a session."""
+        db = get_db_pool()
+        query = """
+            UPDATE user_alert_notifications n
+            SET acknowledged = true
+            FROM user_alerts ua
+            WHERE n.user_alert_id = ua.alert_id
+              AND ua.session_id = %s
+              AND n.acknowledged = false
+        """
+        return db.execute(query, (session_id,))
+
+
+@dataclass
+class OHLCQueries:
+    """
+    SQL query methods for OHLC candle data.
+    Used for efficient charting on longer timeframes.
+    """
+
+    @staticmethod
+    def get_1m_candles(
+        token_id: UUID,
+        start_ts: Optional[datetime] = None,
+        end_ts: Optional[datetime] = None,
+        limit: int = 1000,
+    ) -> list[dict]:
+        """Get 1-minute OHLC candles for a token."""
+        db = get_db_pool()
+
+        conditions = ["token_id = %s"]
+        params = [str(token_id)]
+
+        if start_ts:
+            conditions.append("bucket_ts >= %s")
+            params.append(start_ts)
+        if end_ts:
+            conditions.append("bucket_ts <= %s")
+            params.append(end_ts)
+
+        params.append(limit)
+
+        query = f"""
+            SELECT bucket_ts as ts, open, high, low, close, volume
+            FROM ohlc_1m
+            WHERE {' AND '.join(conditions)}
+            ORDER BY bucket_ts ASC
+            LIMIT %s
+        """
+        return db.execute(query, tuple(params), fetch=True) or []
+
+    @staticmethod
+    def get_1h_candles(
+        token_id: UUID,
+        start_ts: Optional[datetime] = None,
+        end_ts: Optional[datetime] = None,
+        limit: int = 1000,
+    ) -> list[dict]:
+        """Get 1-hour OHLC candles for a token."""
+        db = get_db_pool()
+
+        conditions = ["token_id = %s"]
+        params = [str(token_id)]
+
+        if start_ts:
+            conditions.append("bucket_ts >= %s")
+            params.append(start_ts)
+        if end_ts:
+            conditions.append("bucket_ts <= %s")
+            params.append(end_ts)
+
+        params.append(limit)
+
+        query = f"""
+            SELECT bucket_ts as ts, open, high, low, close, volume
+            FROM ohlc_1h
+            WHERE {' AND '.join(conditions)}
+            ORDER BY bucket_ts ASC
+            LIMIT %s
+        """
+        return db.execute(query, tuple(params), fetch=True) or []
+
+    @staticmethod
+    def get_candles_for_timeframe(
+        token_id: UUID,
+        start_ts: datetime,
+        end_ts: Optional[datetime] = None,
+        hours: int = 24,
+    ) -> list[dict]:
+        """
+        Intelligently select candle resolution based on timeframe.
+        - < 6 hours: Use raw snapshots
+        - 6-48 hours: Use 1m candles
+        - > 48 hours: Use 1h candles
+        """
+        if hours < 6:
+            # Use raw snapshots for short timeframes
+            return MarketQueries.get_snapshots_range(token_id, start_ts, end_ts)
+        elif hours <= 48:
+            # Use 1-minute candles
+            return OHLCQueries.get_1m_candles(token_id, start_ts, end_ts)
+        else:
+            # Use 1-hour candles for longer timeframes
+            return OHLCQueries.get_1h_candles(token_id, start_ts, end_ts)
