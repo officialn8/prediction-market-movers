@@ -7,7 +7,8 @@ import pandas as pd
 from datetime import datetime
 
 from packages.core.storage import get_db_pool
-from packages.core.storage.queries import MarketQueries
+from packages.core.storage.queries import MarketQueries, AnalyticsQueries
+from apps.dashboard.components import render_mover_card, init_watchlist
 
 st.set_page_config(
     page_title="Top Movers | PM Movers",
@@ -28,88 +29,6 @@ st.markdown("""
         margin-bottom: 1rem;
     }
     
-    .mover-card {
-        background: linear-gradient(135deg, #12121a 0%, #1a1a24 100%);
-        border: 1px solid #2a2a3a;
-        border-radius: 12px;
-        padding: 1.25rem;
-        margin-bottom: 1rem;
-        transition: all 0.2s ease;
-    }
-    
-    .mover-card:hover {
-        border-color: #5865f2;
-        transform: translateY(-2px);
-    }
-    
-    .market-title {
-        font-family: 'Space Grotesk', sans-serif;
-        font-size: 1rem;
-        font-weight: 500;
-        color: #e4e4e7;
-        margin-bottom: 0.5rem;
-        line-height: 1.4;
-    }
-    
-    .price-change {
-        font-family: 'JetBrains Mono', monospace;
-        font-size: 1.5rem;
-        font-weight: 600;
-    }
-    
-    .price-change.positive {
-        color: #00d4aa;
-    }
-    
-    .price-change.negative {
-        color: #ff4757;
-    }
-    
-    .price-info {
-        font-family: 'JetBrains Mono', monospace;
-        font-size: 0.85rem;
-        color: #71717a;
-    }
-    
-    .source-tag {
-        display: inline-block;
-        padding: 0.15rem 0.5rem;
-        border-radius: 4px;
-        font-size: 0.7rem;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-    }
-    
-    .source-polymarket {
-        background: rgba(168, 85, 247, 0.2);
-        color: #a855f7;
-    }
-    
-    .source-kalshi {
-        background: rgba(88, 101, 242, 0.2);
-        color: #5865f2;
-    }
-    
-    .outcome-tag {
-        display: inline-block;
-        padding: 0.15rem 0.5rem;
-        border-radius: 4px;
-        font-size: 0.7rem;
-        font-weight: 600;
-        margin-left: 0.5rem;
-    }
-    
-    .outcome-yes {
-        background: rgba(0, 212, 170, 0.15);
-        color: #00d4aa;
-    }
-    
-    .outcome-no {
-        background: rgba(255, 71, 87, 0.15);
-        color: #ff4757;
-    }
-    
     .empty-state {
         text-align: center;
         padding: 4rem 2rem;
@@ -124,70 +43,65 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-def generate_reason(pct_change: float, volume: float, outcome: str) -> str:
-    """Generate a readable reason for the move."""
-    direction = "spiked" if pct_change > 0 else "dropped"
-    abs_pct = abs(pct_change)
-    
-    # Simplify volume
-    if volume >= 1_000_000:
-        vol_str = f"${volume/1_000_000:.1f}M"
-    elif volume >= 1_000:
-        vol_str = f"${volume/1_000:.1f}k"
-    else:
-        vol_str = f"${volume:.0f}"
-        
-    return f"**{outcome}** {direction} **{abs_pct:.1f}%** on {vol_str} vol"
-
-
-def render_mover_card(mover: dict) -> None:
-    """Render a single mover card."""
-    pct_change = float(mover.get("pct_change", 0))
-    change_class = "positive" if pct_change > 0 else "negative"
-    change_sign = "+" if pct_change > 0 else ""
-    
-    source = mover.get("source", "unknown")
-    source_class = f"source-{source}"
-    
-    outcome = mover.get("outcome", "YES")
-    outcome_class = "outcome-yes" if outcome == "YES" else "outcome-no"
-    
-    latest_price = float(mover.get("latest_price", 0))
-    old_price = float(mover.get("old_price", 0))
-    
-    # Try to get volume from various keys (cache vs raw SQL might differ)
-    volume = float(mover.get("latest_volume") or mover.get("volume_24h") or 0)
-    
-    reason = generate_reason(pct_change, volume, outcome)
-    
-    st.markdown(f"""
-    <div class="mover-card">
-        <div style="display: flex; justify-content: space-between; align-items: flex-start;">
-            <div style="flex: 1;">
-                <div>
-                    <span class="source-tag {source_class}">{source}</span>
-                    <span class="outcome-tag {outcome_class}">{outcome}</span>
-                </div>
-                <p class="market-title">{mover.get('title', 'Unknown Market')}</p>
-                <p class="price-info">
-                    ${old_price:.2f} → ${latest_price:.2f}
-                </p>
-                <div style="margin-top: 0.5rem; font-size: 0.85rem; color: #a1a1aa;">
-                    ℹ️ {reason}
-                </div>
-            </div>
-            <div style="text-align: right;">
-                <p class="price-change {change_class}">{change_sign}{pct_change:.1f}%</p>
-                <p class="price-info">{mover.get('category', 'Uncategorized')}</p>
-            </div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-
 def main():
+    # Initialize watchlist (session loading)
+    init_watchlist()
+
     st.markdown('<h1 class="page-title">🚀 Top Movers</h1>', unsafe_allow_html=True)
     
+    # Search implementation (Task 5)
+    search_query = st.text_input("🔍 Search Markets", placeholder="vance, bitcoin, election...", label_visibility="collapsed")
+    
+    if search_query:
+        st.subheader(f"Search Results for '{search_query}'")
+        results = MarketQueries.search_markets(search_query)
+        
+        if not results:
+            st.info("No markets found matching your query.")
+        else:
+            # We need to fetch prices to show useful info
+            ids = [str(r['market_id']) for r in results]
+            full_data = MarketQueries.get_markets_batch_with_prices(ids)
+            
+            for market in full_data:
+                # Construct a pseudo-mover object for rendering
+                # We'll pick the first token or highest volume token
+                tokens = market.get('tokens', [])
+                if not tokens:
+                    continue
+                    
+                # Sort tokens by volume if possible to show most relevant
+                # But tokens might not have volume stats in this view unless we fetched snapshots.
+                # get_markets_batch_with_prices returns 'latest_price' and 'latest_volume' for tokens.
+                
+                # Let's just create a card for each token? No, too many.
+                # Just show the market and its tokens.
+                # Since render_mover_card is specific to single token, maybe we iterate?
+                # Or we make a Custom "Search Result Card".
+                # For consistency, let's use render_mover_card for the first/best token.
+                
+                top_token = tokens[0] # Default
+                
+                mover_wrapper = {
+                    'market_id': market['market_id'],
+                    'token_id': top_token.get('token_id'),
+                    'title': market['title'],
+                    'source': market['source'],
+                    'category': market['category'],
+                    'outcome': top_token.get('outcome'),
+                    'latest_price': top_token.get('latest_price', 0),
+                    'latest_volume': top_token.get('latest_volume', 0),
+                    'pct_change': 0, # Search result doesn't imply move
+                    'old_price': 0
+                }
+                render_mover_card(mover_wrapper, show_watchlist=True)
+                
+        st.markdown("---")
+        if st.button("Clear Search"):
+             st.rerun()
+        return
+
+
     # Filters
     col1, col2, col3, col4 = st.columns([2, 2, 2, 1])
     
@@ -233,9 +147,6 @@ def main():
 
         # Calculate window in seconds
         window_seconds = timeframe_minutes * 60
-
-        # Try to fetch from cache first for supported windows (5m, 15m, 1h, 24h)
-        from packages.core.storage.queries import AnalyticsQueries
 
         movers = []
         used_cache = False
@@ -317,4 +228,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

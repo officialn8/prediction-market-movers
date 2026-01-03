@@ -100,6 +100,20 @@ class MarketQueries:
         """
         return db.execute(query, tuple(params), fetch=True) or []
     
+    @staticmethod
+    def search_markets(query: str, limit: int = 20) -> list[dict]:
+        """Search markets by title or category."""
+        db = get_db_pool()
+        sql = """
+            SELECT m.*
+            FROM markets m
+            WHERE (m.title ILIKE %s OR m.category ILIKE %s)
+            AND m.status = 'active'
+            LIMIT %s
+        """
+        search_term = f"%{query}%"
+        return db.execute(sql, (search_term, search_term, limit), fetch=True) or []
+    
     # =========================================================================
     # TOKEN OPERATIONS
     # =========================================================================
@@ -1013,3 +1027,62 @@ class OHLCQueries:
         else:
             # Use 1-hour candles for longer timeframes
             return OHLCQueries.get_1h_candles(token_id, start_ts, end_ts)
+
+@dataclass
+class WatchlistQueries:
+    """
+    SQL queries for user watchlist management.
+    """
+
+    @staticmethod
+    def add(user_session_id: str, market_id: str) -> bool:
+        """Add a market to user watchlist."""
+        db = get_db_pool()
+        query = """
+            INSERT INTO user_watchlist (user_session_id, market_id)
+            VALUES (%s, %s)
+            ON CONFLICT (user_session_id, market_id) DO NOTHING
+        """
+        try:
+            db.execute(query, (user_session_id, str(market_id)))
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def remove(user_session_id: str, market_id: str) -> bool:
+        """Remove a market from user watchlist."""
+        db = get_db_pool()
+        query = """
+            DELETE FROM user_watchlist 
+            WHERE user_session_id = %s AND market_id = %s
+        """
+        db.execute(query, (user_session_id, str(market_id)))
+        return True
+
+    @staticmethod
+    def get_all(user_session_id: str) -> list[dict]:
+        """Get all watched markets for a session."""
+        db = get_db_pool()
+        query = """
+            SELECT 
+                uw.market_id,
+                uw.added_at,
+                m.title,
+                m.source,
+                m.category,
+                m.status
+            FROM user_watchlist uw
+            JOIN markets m ON uw.market_id = m.market_id
+            WHERE uw.user_session_id = %s
+            ORDER BY uw.added_at DESC
+        """
+        return db.execute(query, (user_session_id,), fetch=True) or []
+    
+    @staticmethod
+    def clear(user_session_id: str) -> bool:
+        """Clear entire watchlist for a session."""
+        db = get_db_pool()
+        query = "DELETE FROM user_watchlist WHERE user_session_id = %s"
+        db.execute(query, (user_session_id,))
+        return True
