@@ -8,7 +8,7 @@ from datetime import datetime
 
 from packages.core.storage import get_db_pool
 from packages.core.storage.queries import MarketQueries, AnalyticsQueries
-from apps.dashboard.components import render_mover_list_item, init_watchlist, to_user_tz
+from apps.dashboard.components import render_mover_card, init_watchlist, to_user_tz
 
 st.set_page_config(
     page_title="What's Moving Now | PM Movers",
@@ -71,7 +71,7 @@ def main():
                     'latest_volume': top_token.get('latest_volume', 0),
                     'pct_change': 0, 'old_price': 0
                 }
-                 render_mover_list_item(mover_wrapper)
+                 render_mover_card(mover_wrapper)
         if st.button("Clear Search"): st.rerun()
         return
 
@@ -161,7 +161,7 @@ def main():
 
         # List Display (The 'Killer View')
         for mover in movers:
-            render_mover_list_item(mover)
+            render_mover_card(mover)
             
         # Footer
         st.markdown("<br><br>", unsafe_allow_html=True)
