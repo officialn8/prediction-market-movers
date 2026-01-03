@@ -170,6 +170,25 @@ async def run_user_alerts_loop(shutdown: Shutdown) -> None:
             continue
 
 
+async def run_volume_spikes_loop(shutdown: Shutdown) -> None:
+    """Background loop for detecting volume spikes (unusual activity)."""
+    from apps.collector.jobs.volume_spikes import check_volume_spikes
+
+    logger.info("Volume spikes loop starting (interval=120s)")
+    while not shutdown.is_set:
+        try:
+            await check_volume_spikes()
+        except Exception:
+            logger.exception("Error in volume spikes loop")
+
+        try:
+            # Check every 2 minutes for volume anomalies
+            await asyncio.wait_for(shutdown.wait(), timeout=120)
+            break
+        except asyncio.TimeoutError:
+            continue
+
+
 async def _amain() -> None:
     _configure_logging()
     logger.info("Starting collector…")
@@ -204,6 +223,7 @@ async def _amain() -> None:
         bg_tasks.append(asyncio.create_task(run_movers_cache_loop(shutdown)))
         bg_tasks.append(asyncio.create_task(run_rollups_loop(shutdown)))
         bg_tasks.append(asyncio.create_task(run_user_alerts_loop(shutdown)))
+        bg_tasks.append(asyncio.create_task(run_volume_spikes_loop(shutdown)))
 
     try:
         if mode == "simulated":
