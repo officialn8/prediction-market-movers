@@ -358,6 +358,135 @@ class MarketQueries:
         return db.execute(query, tuple(params), fetch=True) or []
 
     @staticmethod
+    def get_movers_window(
+        window_seconds: int,
+        limit: int = 20,
+        source: Optional[str] = None,
+        category: Optional[str] = None,
+        direction: str = "both",
+    ) -> list[dict]:
+        """
+        Get top price movers over an arbitrary time window in seconds.
+        """
+        db = get_db_pool()
+
+        source_filter = "AND m.source = %s" if source else ""
+        category_filter = "AND m.category = %s" if category else ""
+
+        if direction == "gainers":
+            direction_filter = "AND pct_change > 0"
+            order = "pct_change DESC"
+        elif direction == "losers":
+            direction_filter = "AND pct_change < 0"
+            order = "pct_change ASC"
+        else:
+            direction_filter = ""
+            order = "ABS(pct_change) DESC"
+        
+        # Filter markets ending very soon
+        expiry_filter = "AND (m.end_date IS NULL OR m.end_date > NOW() + INTERVAL '24 hours')"
+
+        query = f"""
+            WITH latest AS (
+                SELECT DISTINCT ON (token_id)
+                    token_id,
+                    ts as latest_ts,
+                    price as latest_price,
+                    volume_24h as latest_volume
+                FROM snapshots
+                ORDER BY token_id, ts DESC
+            ),
+            historical AS (
+                SELECT DISTINCT ON (token_id)
+                    token_id,
+                    price as old_price
+                FROM snapshots
+                WHERE ts <= NOW() - (%s * INTERVAL '1 second')
+                ORDER BY token_id, ts DESC
+            ),
+            changes AS (
+                SELECT
+                    l.token_id,
+                    l.latest_ts,
+                    l.latest_price,
+                    l.latest_volume,
+                    h.old_price,
+                    CASE
+                        WHEN h.old_price > 0 THEN
+                            ROUND(((l.latest_price - h.old_price) / h.old_price * 100)::numeric, 2)
+                        ELSE NULL
+                    END as pct_change
+                FROM latest l
+                JOIN historical h ON l.token_id = h.token_id
+            )
+            SELECT
+                c.*,
+                mt.market_id,
+                mt.outcome,
+                m.title,
+                m.source,
+                m.category,
+                m.url
+            FROM changes c
+            JOIN market_tokens mt ON c.token_id = mt.token_id
+            JOIN markets m ON mt.market_id = m.market_id
+            WHERE m.status = 'active'
+              AND c.pct_change IS NOT NULL
+              {source_filter}
+              {category_filter}
+              {direction_filter}
+              {expiry_filter}
+            ORDER BY {order}
+            LIMIT %s
+        """
+
+        params = [window_seconds]
+        if source:
+            params.append(source)
+        if category:
+            params.append(category)
+        params.append(limit)
+
+        return db.execute(query, tuple(params), fetch=True) or []
+
+    @staticmethod
+    def get_markets_batch_with_prices(market_ids: list[str]) -> list[dict]:
+        """
+        Get details for multiple markets efficiently.
+        Returns market details with tokens and latest prices.
+        """
+        if not market_ids:
+            return []
+            
+        db = get_db_pool()
+        query = """
+            SELECT 
+                m.*,
+                json_agg(
+                    json_build_object(
+                        'token_id', mt.token_id,
+                        'outcome', mt.outcome,
+                        'symbol', mt.symbol,
+                        'latest_price', (
+                            SELECT price FROM snapshots 
+                            WHERE token_id = mt.token_id 
+                            ORDER BY ts DESC LIMIT 1
+                        ),
+                        'latest_volume', (
+                            SELECT volume_24h FROM snapshots 
+                            WHERE token_id = mt.token_id 
+                            ORDER BY ts DESC LIMIT 1
+                        )
+                    )
+                ) as tokens
+            FROM markets m
+            LEFT JOIN market_tokens mt ON m.market_id = mt.market_id
+            WHERE m.market_id = ANY(%s::uuid[])
+            GROUP BY m.market_id
+        """
+        return db.execute(query, (market_ids,), fetch=True) or []
+
+    @staticmethod
     def get_category_stats(hours: int = 24) -> list[dict]:
         """
         Get aggregated statistics by category.
