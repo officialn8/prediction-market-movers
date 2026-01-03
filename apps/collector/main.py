@@ -19,6 +19,33 @@ from packages.core.storage import get_db_pool
 logger = logging.getLogger("collector")
 
 
+def run_migrations() -> None:
+    """Run SQL migrations on startup."""
+    import glob
+    from packages.core.storage.db import get_db_pool
+    
+    db = get_db_pool()
+    migration_files = sorted(glob.glob("migrations/*.sql"))
+    
+    if not migration_files:
+        logger.info("No migrations found.")
+        return
+
+    logger.info(f"Found {len(migration_files)} migrations. Applying...")
+
+    for mig in migration_files:
+        try:
+            with open(mig) as f:
+                db.execute(f.read())
+            logger.info(f"Applied migration: {mig}")
+        except Exception as e:
+            # Log but don't crash immediately? Or crash?
+            # If a migration fails, it's usually bad.
+            logger.error(f"Migration failed {mig}: {e}")
+            raise
+
+
+
 def _configure_logging() -> None:
     logging.basicConfig(
         level=getattr(logging, settings.log_level.upper(), logging.INFO),
@@ -182,6 +209,13 @@ async def _amain() -> None:
         pass
     except Exception:
         logger.exception("Database connectivity check failed.")
+        sys.exit(1)
+
+    # Run migrations
+    try:
+        run_migrations()
+    except Exception:
+        logger.exception("Failed to run migrations.")
         sys.exit(1)
 
     shutdown = Shutdown()
