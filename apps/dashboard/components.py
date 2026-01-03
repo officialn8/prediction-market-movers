@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 from typing import Optional
 import uuid
+
 import pandas as pd
 import streamlit as st
 import altair as alt
@@ -239,30 +240,30 @@ def render_mover_card(mover: dict, show_watchlist: bool = True) -> None:
     star_color = "#fbbf24" if in_watchlist else "#71717a"
 
     # Render the card HTML
-    st.markdown(f"""
-<div class="mover-card" style="background: linear-gradient(135deg, #12121a 0%, #1a1a24 100%); border: 1px solid #2a2a3a; border-radius: 12px; padding: 1.25rem; margin-bottom: 0.5rem;">
-    <div style="display: flex; justify-content: space-between; align-items: flex-start;">
-        <div style="flex: 1;">
-            <div>
-                <span class="source-tag {source_class}" style="display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.7rem; font-weight: 600; text-transform: uppercase; background: rgba(168, 85, 247, 0.2); color: #a855f7;">{source}</span>
-                <span class="outcome-tag {outcome_class}" style="display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.7rem; font-weight: 600; margin-left: 0.5rem; background: {'rgba(0, 212, 170, 0.15); color: #00d4aa;' if outcome == 'YES' else 'rgba(255, 71, 87, 0.15); color: #ff4757;'}">{outcome}</span>
-                {spike_badge}
+    st.html(f"""
+    <div class="mover-card" style="background: linear-gradient(135deg, #12121a 0%, #1a1a24 100%); border: 1px solid #2a2a3a; border-radius: 12px; padding: 1.25rem; margin-bottom: 0.5rem;">
+        <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+            <div style="flex: 1;">
+                <div>
+                    <span class="source-tag {source_class}" style="display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.7rem; font-weight: 600; text-transform: uppercase; background: rgba(168, 85, 247, 0.2); color: #a855f7;">{source}</span>
+                    <span class="outcome-tag {outcome_class}" style="display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.7rem; font-weight: 600; margin-left: 0.5rem; background: {'rgba(0, 212, 170, 0.15); color: #00d4aa;' if outcome == 'YES' else 'rgba(255, 71, 87, 0.15); color: #ff4757;'}">{outcome}</span>
+                    {spike_badge}
+                </div>
+                <p class="market-title" style="font-family: 'Space Grotesk', sans-serif; font-size: 1rem; font-weight: 500; color: #e4e4e7; margin-bottom: 0.5rem; line-height: 1.4;">{title}</p>
+                <p class="price-info" style="font-family: 'JetBrains Mono', monospace; font-size: 0.85rem; color: #71717a;">
+                    ${old_price:.2f} → ${latest_price:.2f}
+                </p>
+                <div style="margin-top: 0.5rem; font-size: 0.85rem; color: #a1a1aa;">
+                    ℹ️ {reason}
+                </div>
             </div>
-            <p class="market-title" style="font-family: 'Space Grotesk', sans-serif; font-size: 1rem; font-weight: 500; color: #e4e4e7; margin-bottom: 0.5rem; line-height: 1.4;">{title}</p>
-            <p class="price-info" style="font-family: 'JetBrains Mono', monospace; font-size: 0.85rem; color: #71717a;">
-                ${old_price:.2f} → ${latest_price:.2f}
-            </p>
-            <div style="margin-top: 0.5rem; font-size: 0.85rem; color: #a1a1aa;">
-                ℹ️ {reason}
+            <div style="text-align: right;">
+                <p class="price-change {change_class}" style="font-family: 'JetBrains Mono', monospace; font-size: 1.5rem; font-weight: 600; color: {'#00d4aa' if pct_change > 0 else '#ff4757'};">{change_sign}{pct_change:.1f}%</p>
+                <p class="price-info" style="margin-top: 0;">{mover.get('category', 'Uncategorized')}</p>
             </div>
-        </div>
-        <div style="text-align: right;">
-            <p class="price-change {change_class}" style="font-family: 'JetBrains Mono', monospace; font-size: 1.5rem; font-weight: 600; color: {'#00d4aa' if pct_change > 0 else '#ff4757'};">{change_sign}{pct_change:.1f}%</p>
-            <p class="price-info" style="margin-top: 0;">{mover.get('category', 'Uncategorized')}</p>
         </div>
     </div>
-</div>
-    """, unsafe_allow_html=True)
+    """)
 
     # Render watchlist button below the card (Streamlit button)
     if show_watchlist and market_id:
@@ -301,27 +302,27 @@ def render_volume_spike_alert(spike: dict) -> None:
         sign = "+" if pc > 0 else ""
         price_str += f" ({sign}{pc:.1f}%)"
 
-    st.markdown(f"""
-<div style="background: linear-gradient(135deg, #12121a 0%, #1a1a24 100%); border: 1px solid {color}; border-radius: 12px; padding: 1rem; margin-bottom: 0.5rem;">
-    <div style="display: flex; justify-content: space-between; align-items: center;">
-        <div>
-            <span style="display: inline-block; padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.7rem; font-weight: 600; text-transform: uppercase; background: rgba({_hex_to_rgb(color)}, 0.2); color: {color};">
-                🔥 {severity.upper()} VOLUME SPIKE
-            </span>
-            <p style="font-family: 'Space Grotesk', sans-serif; font-size: 0.95rem; font-weight: 500; color: #e4e4e7; margin: 0.5rem 0 0.25rem 0;">
-                {title} {f'({outcome})' if outcome else ''}
-            </p>
-            <p style="font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; color: #71717a;">
-                {format_volume(current_volume)} volume (avg {format_volume(avg_volume)})
-                {f' | {price_str}' if price_str else ''}
-            </p>
-        </div>
-        <div style="text-align: right;">
-            <p style="font-family: 'JetBrains Mono', monospace; font-size: 1.5rem; font-weight: 600; color: {color};">
-                {spike_ratio:.1f}x
-            </p>
-            <p style="font-size: 0.75rem; color: #71717a;">normal volume</p>
+    st.html(f"""
+    <div style="background: linear-gradient(135deg, #12121a 0%, #1a1a24 100%); border: 1px solid {color}; border-radius: 12px; padding: 1rem; margin-bottom: 0.5rem;">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div>
+                <span style="display: inline-block; padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.7rem; font-weight: 600; text-transform: uppercase; background: rgba({_hex_to_rgb(color)}, 0.2); color: {color};">
+                    🔥 {severity.upper()} VOLUME SPIKE
+                </span>
+                <p style="font-family: 'Space Grotesk', sans-serif; font-size: 0.95rem; font-weight: 500; color: #e4e4e7; margin: 0.5rem 0 0.25rem 0;">
+                    {title} {f'({outcome})' if outcome else ''}
+                </p>
+                <p style="font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; color: #71717a;">
+                    {format_volume(current_volume)} volume (avg {format_volume(avg_volume)})
+                    {f' | {price_str}' if price_str else ''}
+                </p>
+            </div>
+            <div style="text-align: right;">
+                <p style="font-family: 'JetBrains Mono', monospace; font-size: 1.5rem; font-weight: 600; color: {color};">
+                    {spike_ratio:.1f}x
+                </p>
+                <p style="font-size: 0.75rem; color: #71717a;">normal volume</p>
+            </div>
         </div>
     </div>
-</div>
-    """, unsafe_allow_html=True)
+    """)
