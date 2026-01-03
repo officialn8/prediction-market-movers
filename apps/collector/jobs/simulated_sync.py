@@ -47,7 +47,9 @@ def seed_simulated_markets(n_markets: int = 30) -> SimState:
             url=url,
         )
 
-        market_id = UUID(m["market_id"])
+        market_id = m["market_id"]
+        if not isinstance(market_id, UUID):
+            market_id = UUID(str(market_id))
 
         yes = MarketQueries.upsert_token(
             market_id=market_id,
@@ -62,9 +64,17 @@ def seed_simulated_markets(n_markets: int = 30) -> SimState:
             source_token_id=f"{source_id}:NO",
         )
 
+        yes_token_id = yes["token_id"]
+        if not isinstance(yes_token_id, UUID):
+            yes_token_id = UUID(str(yes_token_id))
+
+        no_token_id = no["token_id"]
+        if not isinstance(no_token_id, UUID):
+            no_token_id = UUID(str(no_token_id))
+
         state[market_id] = {
-            "YES": UUID(yes["token_id"]),
-            "NO": UUID(no["token_id"]),
+            "YES": yes_token_id,
+            "NO": no_token_id,
         }
 
     return SimState(market_tokens=state)
