@@ -1416,3 +1416,50 @@ class VolumeQueries:
         params.append(limit)
 
         return db.execute(query, tuple(params), fetch=True) or []
+
+
+@dataclass
+class WatchlistQueries:
+    """
+    SQL query methods for user watchlist operations.
+    """
+
+    @staticmethod
+    def get_all(user_session_id: str) -> list[dict]:
+        """Get all watchlist items for a user session."""
+        db = get_db_pool()
+        query = """
+            SELECT 
+                uw.*,
+                m.title,
+                m.source,
+                m.category,
+                m.url
+            FROM user_watchlist uw
+            JOIN markets m ON uw.market_id = m.market_id
+            WHERE uw.user_session_id = %s
+            ORDER BY uw.added_at DESC
+        """
+        return db.execute(query, (user_session_id,), fetch=True) or []
+
+    @staticmethod
+    def add(user_session_id: str, market_id: str) -> None:
+        """Add a market to the user's watchlist."""
+        db = get_db_pool()
+        query = """
+            INSERT INTO user_watchlist (user_session_id, market_id)
+            VALUES (%s, %s)
+            ON CONFLICT (user_session_id, market_id) DO NOTHING
+        """
+        db.execute(query, (user_session_id, market_id))
+
+    @staticmethod
+    def remove(user_session_id: str, market_id: str) -> None:
+        """Remove a market from the user's watchlist."""
+        db = get_db_pool()
+        query = """
+            DELETE FROM user_watchlist
+            WHERE user_session_id = %s AND market_id = %s
+        """
+        db.execute(query, (user_session_id, market_id))
+
