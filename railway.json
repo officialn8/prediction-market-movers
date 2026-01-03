@@ -5,7 +5,7 @@
         "dockerfilePath": "apps/dashboard/Dockerfile"
     },
     "deploy": {
-        "startCommand": "streamlit run apps/dashboard/app.py --server.port=$PORT --server.address=0.0.0.0",
+        "startCommand": "sh -c 'streamlit run apps/dashboard/app.py --server.port=${PORT:-8501} --server.address=0.0.0.0'",
         "healthcheckPath": "/_stcore/health",
         "restartPolicyType": "ON_FAILURE"
     }
