@@ -712,6 +712,7 @@ class AnalyticsQueries:
         window_seconds: int = 3600,
         limit: int = 20,
         source: Optional[str] = None,
+        category: Optional[str] = None,
         direction: str = "both",
     ) -> list[dict]:
         """
@@ -721,6 +722,7 @@ class AnalyticsQueries:
         db = get_db_pool()
         
         source_filter = "AND m.source = %s" if source else ""
+        category_filter = "AND m.category = %s" if category else ""
         
         if direction == "gainers":
             direction_filter = "AND mc.move_pp > 0"
@@ -754,6 +756,7 @@ class AnalyticsQueries:
             JOIN markets m ON mt.market_id = m.market_id
             WHERE mc.window_seconds = %s
               {source_filter}
+              {category_filter}
               {direction_filter}
             ORDER BY mc.rank ASC -- Pre-calculated rank
             LIMIT %s
@@ -762,6 +765,8 @@ class AnalyticsQueries:
         params = [window_seconds, window_seconds]
         if source:
             params.append(source)
+        if category:
+            params.append(category)
         params.append(limit)
 
         return db.execute(query, tuple(params), fetch=True) or []

@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 
 from packages.core.storage import get_db_pool
 from packages.core.storage.queries import MarketQueries, OHLCQueries
+from apps.dashboard.components import to_user_tz
 
 st.set_page_config(
     page_title="Market Detail | PM Movers",
@@ -72,6 +73,7 @@ def create_price_chart(data: list[dict], token_outcome: str, use_ohlc: bool = Fa
 
     df = pd.DataFrame(data)
     df["ts"] = pd.to_datetime(df["ts"])
+    df["ts"] = df["ts"].apply(to_user_tz)
     df = df.sort_values("ts")
 
     color = "#00d4aa" if token_outcome == "YES" else "#ff4757"

@@ -1,0 +1,873 @@
+[
+  {
+    "id": "766",
+    "label": "u.s. congress",
+    "slug": "uptspt-congress",
+    "publishedAt": "2023-12-20 18:56:23.087+00",
+    "createdAt": "2023-12-20T18:56:23.109Z",
+    "updatedAt": "2025-12-18T02:37:54.922815Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "1205",
+    "label": "south carolina primary",
+    "slug": "south-carolina-primary",
+    "publishedAt": "2024-02-06 20:00:09.151+00",
+    "createdAt": "2024-02-06T20:00:09.157Z",
+    "updatedAt": "2025-12-18T02:41:33.660168Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "102767",
+    "label": "kash",
+    "slug": "kash",
+    "createdAt": "2025-10-23T16:30:28.265812Z",
+    "updatedAt": "2025-12-18T02:41:33.664275Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "101453",
+    "label": "Rotten Tomatoes",
+    "slug": "rotten-tomatoes",
+    "createdAt": "2024-12-10T19:36:30.803129Z",
+    "updatedAt": "2025-12-18T02:41:33.665323Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "945",
+    "label": "michelle obama",
+    "slug": "michelle-obama",
+    "publishedAt": "2024-02-01 19:15:00.647+00",
+    "createdAt": "2024-02-01T19:15:00.664Z",
+    "updatedAt": "2025-12-18T02:41:33.666818Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "1192",
+    "label": "minnesota vikings",
+    "slug": "minnesota-vikings",
+    "publishedAt": "2024-02-06 19:57:28.922+00",
+    "createdAt": "2024-02-06T19:57:28.974Z",
+    "updatedAt": "2025-12-18T02:41:36.542013Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "414",
+    "label": "health",
+    "slug": "health",
+    "publishedAt": "2023-11-02 22:19:19.68+00",
+    "updatedBy": 15,
+    "createdAt": "2023-11-02T22:19:19.698Z",
+    "updatedAt": "2025-12-18T02:45:42.532054Z",
+    "forceHide": true,
+    "requiresTranslation": false
+  },
+  {
+    "id": "1553",
+    "label": "heli rodriguez-prilliman",
+    "slug": "heli-rodriguez-prilliman",
+    "publishedAt": "2024-03-01 21:24:32.655+00",
+    "createdAt": "2024-03-01T21:24:32.66Z",
+    "updatedAt": "2025-12-18T02:45:42.533423Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "1525",
+    "label": "high-end goods",
+    "slug": "high-end-goods",
+    "publishedAt": "2024-02-29 18:56:42.78+00",
+    "createdAt": "2024-02-29T18:56:42.804Z",
+    "updatedAt": "2025-12-18T02:45:42.534631Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "1542",
+    "label": "hostage crisis",
+    "slug": "hostage-crisis",
+    "publishedAt": "2024-03-01 20:07:18.328+00",
+    "createdAt": "2024-03-01T20:07:18.35Z",
+    "updatedAt": "2025-12-18T02:45:49.609522Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "235",
+    "label": "Bitcoin",
+    "slug": "bitcoin",
+    "forceShow": true,
+    "publishedAt": "2023-11-02 21:40:32.968+00",
+    "updatedBy": 15,
+    "createdAt": "2023-11-02T21:40:32.974Z",
+    "updatedAt": "2025-12-18T02:47:15.411644Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "100182",
+    "label": "H5N1",
+    "slug": "h5n1",
+    "updatedAt": "2025-12-18T02:47:15.412953Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "100129",
+    "label": "Sacramento Kings",
+    "slug": "sacramento-kings",
+    "updatedAt": "2025-12-18T02:47:15.413886Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "100162",
+    "label": "San Jose Sharks",
+    "slug": "san-jose-sharks",
+    "updatedAt": "2025-12-18T02:47:15.414718Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "1602",
+    "label": "haiti",
+    "slug": "haiti",
+    "publishedAt": "2024-03-07 22:27:45.382+00",
+    "createdAt": "2024-03-07T22:27:45.388Z",
+    "updatedAt": "2025-12-18T02:47:15.415506Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "1245",
+    "label": "inter milan",
+    "slug": "inter-milan",
+    "publishedAt": "2024-02-06 20:06:00.715+00",
+    "createdAt": "2024-02-06T20:06:00.75Z",
+    "updatedAt": "2025-12-18T02:49:30.692782Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "131",
+    "label": "interest rates",
+    "slug": "interest-rates",
+    "forceShow": false,
+    "publishedAt": "2023-11-02 21:23:31.802+00",
+    "updatedBy": 15,
+    "createdAt": "2023-11-02T21:23:31.816Z",
+    "updatedAt": "2025-12-18T02:49:30.696996Z",
+    "forceHide": false,
+    "requiresTranslation": false
+  },
+  {
+    "id": "1396",
+    "label": "international affairs",
+    "slug": "international-affairs",
+    "publishedAt": "2024-02-21 21:35:25.3+00",
+    "createdAt": "2024-02-21T21:35:25.315Z",
+    "updatedAt": "2025-12-18T02:49:35.694427Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "1554",
+    "label": "thierry tchenko",
+    "slug": "thierry-tchenko",
+    "publishedAt": "2024-03-01 21:25:25.647+00",
+    "createdAt": "2024-03-01T21:25:25.666Z",
+    "updatedAt": "2025-12-18T02:51:35.74698Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "588",
+    "label": "third party",
+    "slug": "third-party",
+    "publishedAt": "2023-11-29 16:29:55.495+00",
+    "createdAt": "2023-11-29T16:29:55.52Z",
+    "updatedAt": "2025-12-18T02:51:40.130427Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "126",
+    "label": "Trump",
+    "slug": "trump",
+    "forceShow": false,
+    "publishedAt": "2023-11-02 21:23:16.384+00",
+    "updatedBy": 15,
+    "createdAt": "2023-11-02T21:23:16.39Z",
+    "updatedAt": "2025-12-18T02:52:06.992969Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "100220",
+    "label": "Trump Trials",
+    "slug": "trump-trials",
+    "forceShow": true,
+    "createdAt": "2024-05-15T17:19:46.57617Z",
+    "updatedAt": "2025-12-18T02:52:06.993838Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "101214",
+    "label": "Maryland",
+    "slug": "maryland",
+    "createdAt": "2024-11-08T19:56:54.361447Z",
+    "updatedAt": "2025-12-18T02:55:07.684666Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "101225",
+    "label": "Jones",
+    "slug": "jones",
+    "createdAt": "2024-11-11T19:03:00.789203Z",
+    "updatedAt": "2025-12-18T02:55:07.688426Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "101236",
+    "label": "magazine",
+    "slug": "magazine",
+    "createdAt": "2024-11-11T23:59:34.945589Z",
+    "updatedAt": "2025-12-18T02:55:07.689927Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "101252",
+    "label": "Macro Election 2",
+    "slug": "macro-election-2",
+    "forceShow": false,
+    "createdAt": "2024-11-13T01:41:08.414056Z",
+    "updatedAt": "2025-12-18T02:55:07.691638Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "101272",
+    "label": "Hungary",
+    "slug": "hungary",
+    "createdAt": "2024-11-15T21:44:57.110084Z",
+    "updatedAt": "2025-12-18T02:55:07.693075Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "101306",
+    "label": "markt cap",
+    "slug": "markt-cap",
+    "createdAt": "2024-11-21T21:49:57.928046Z",
+    "updatedAt": "2025-12-18T02:55:14.235713Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "101181",
+    "label": "Shakhtar Donetsk",
+    "slug": "shakhtar-donetsk",
+    "createdAt": "2024-11-05T04:05:36.394625Z",
+    "updatedAt": "2025-12-18T02:56:22.243143Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "101182",
+    "label": "Stuttgart",
+    "slug": "stuttgart",
+    "createdAt": "2024-11-05T04:49:20.699662Z",
+    "updatedAt": "2025-12-18T02:56:22.245761Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "101183",
+    "label": "FK",
+    "slug": "fk",
+    "createdAt": "2024-11-05T20:58:38.586286Z",
+    "updatedAt": "2025-12-18T02:56:22.246943Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "24",
+    "label": "USA Election",
+    "slug": "us-election",
+    "forceShow": true,
+    "publishedAt": "2023-11-02 21:04:03.712+00",
+    "updatedBy": 15,
+    "createdAt": "2023-11-02T21:04:03.723Z",
+    "updatedAt": "2025-12-18T02:56:22.250228Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "101185",
+    "label": "Union St-Gilloise",
+    "slug": "union-st-gilloise",
+    "createdAt": "2024-11-05T21:45:42.169254Z",
+    "updatedAt": "2025-12-18T02:56:25.696298Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "100802",
+    "label": "Hoddy Toddy",
+    "slug": "hoddy-toddy",
+    "createdAt": "2024-10-11T15:49:49.570025Z",
+    "updatedAt": "2025-12-18T02:58:34.382728Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "101177",
+    "label": "megaquake",
+    "slug": "megaquake",
+    "createdAt": "2024-11-04T16:58:53.91661Z",
+    "updatedAt": "2025-12-18T03:00:07.247118Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "100199",
+    "label": "Senate",
+    "slug": "senate-elections",
+    "forceShow": false,
+    "updatedAt": "2025-12-18T03:00:07.248032Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "101180",
+    "label": "LOSC",
+    "slug": "losc",
+    "createdAt": "2024-11-04T23:42:26.363363Z",
+    "updatedAt": "2025-12-18T03:00:07.249403Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "1101",
+    "label": "US Election",
+    "slug": "us-presidential-election",
+    "forceShow": false,
+    "publishedAt": "2024-02-06 19:42:10.126+00",
+    "createdAt": "2024-02-06T19:42:10.132Z",
+    "updatedAt": "2025-12-18T03:00:07.250514Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "101184",
+    "label": "Eintracht",
+    "slug": "eintracht",
+    "createdAt": "2024-11-05T21:02:59.882391Z",
+    "updatedAt": "2025-12-18T03:00:11.34928Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "101749",
+    "label": "Jordan",
+    "slug": "jordan",
+    "createdAt": "2025-01-30T23:16:38.668516Z",
+    "updatedAt": "2025-12-18T03:07:23.228535Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "101079",
+    "label": "third",
+    "slug": "third",
+    "createdAt": "2024-10-24T22:35:08.333028Z",
+    "updatedAt": "2025-12-18T03:02:36.620991Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "101080",
+    "label": "two",
+    "slug": "two",
+    "createdAt": "2024-10-24T22:35:08.688391Z",
+    "updatedAt": "2025-12-18T03:02:36.622442Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "101081",
+    "label": "Fiorentina",
+    "slug": "fiorentina",
+    "createdAt": "2024-10-25T01:11:17.932307Z",
+    "updatedAt": "2025-12-18T03:02:36.623126Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "101031",
+    "label": "Commodities",
+    "slug": "commodities",
+    "forceShow": false,
+    "createdAt": "2024-10-22T15:45:27.386784Z",
+    "updatedAt": "2025-12-18T03:02:36.62376Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "101082",
+    "label": "Boise State",
+    "slug": "boise-state",
+    "createdAt": "2024-10-25T15:39:42.964949Z",
+    "updatedAt": "2025-12-18T03:02:36.624494Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "101083",
+    "label": "Ole Miss",
+    "slug": "ole-miss",
+    "createdAt": "2024-10-25T17:50:08.94135Z",
+    "updatedAt": "2025-12-18T03:02:36.625072Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "369",
+    "label": "vikings",
+    "slug": "vikings",
+    "publishedAt": "2023-11-02 22:06:28.087+00",
+    "createdAt": "2023-11-02T22:06:28.099Z",
+    "updatedAt": "2025-12-18T02:16:01.241139Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "100466",
+    "label": "app",
+    "slug": "app",
+    "createdAt": "2024-09-17T14:54:43.333428Z",
+    "updatedAt": "2025-12-18T02:16:01.252633Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "101750",
+    "label": "Hurts",
+    "slug": "hurts",
+    "createdAt": "2025-01-30T23:44:06.888222Z",
+    "updatedAt": "2025-12-18T03:07:23.229985Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "1026",
+    "label": "election forecasting.",
+    "slug": "election-forecastingpt",
+    "publishedAt": "2024-02-06 19:29:47.358+00",
+    "createdAt": "2024-02-06T19:29:47.382Z",
+    "updatedAt": "2025-12-18T02:16:01.254422Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "101751",
+    "label": "deficit",
+    "slug": "deficit",
+    "createdAt": "2025-01-31T04:44:49.213285Z",
+    "updatedAt": "2025-12-18T03:07:23.230748Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "101752",
+    "label": "karoline leavitt",
+    "slug": "karoline-leavitt",
+    "createdAt": "2025-01-31T18:35:42.12183Z",
+    "updatedAt": "2025-12-18T03:07:29.42103Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "101133",
+    "label": "electors",
+    "slug": "electors",
+    "createdAt": "2024-10-29T22:50:57.762385Z",
+    "updatedAt": "2025-12-18T02:16:01.255696Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "101891",
+    "label": "exploit",
+    "slug": "exploit",
+    "createdAt": "2025-02-21T16:08:12.011867Z",
+    "updatedAt": "2025-12-18T03:09:22.554532Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "101892",
+    "label": "bybit",
+    "slug": "bybit",
+    "createdAt": "2025-02-21T16:40:07.062648Z",
+    "updatedAt": "2025-12-18T03:09:22.612Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "313",
+    "label": "hans",
+    "slug": "hans",
+    "publishedAt": "2023-11-02 21:53:37.968+00",
+    "createdAt": "2023-11-02T21:53:37.978Z",
+    "updatedAt": "2025-12-18T02:16:01.256318Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "298",
+    "label": "vp nominee",
+    "slug": "vp-nominee",
+    "publishedAt": "2023-11-02 21:51:41.37+00",
+    "createdAt": "2023-11-02T21:51:41.382Z",
+    "updatedAt": "2025-12-18T02:16:07.266298Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "413",
+    "label": "weed",
+    "slug": "weed",
+    "publishedAt": "2023-11-02 22:19:14.728+00",
+    "createdAt": "2023-11-02T22:19:14.743Z",
+    "updatedAt": "2025-12-18T02:16:07.267975Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "323",
+    "label": "harry",
+    "slug": "harry",
+    "publishedAt": "2023-11-02 21:54:44.266+00",
+    "createdAt": "2023-11-02T21:54:44.279Z",
+    "updatedAt": "2025-12-18T02:16:07.26909Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "1022",
+    "label": "election results",
+    "slug": "election-results",
+    "publishedAt": "2024-02-06 19:29:05.644+00",
+    "createdAt": "2024-02-06T19:29:05.68Z",
+    "updatedAt": "2025-12-18T02:16:07.270181Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "377",
+    "label": "elections 2024",
+    "slug": "elections-2024",
+    "publishedAt": "2023-11-02 22:07:43.051+00",
+    "createdAt": "2023-11-02T22:07:43.06Z",
+    "updatedAt": "2025-12-18T02:16:07.271359Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "366",
+    "label": "world affairs",
+    "slug": "world-affairs",
+    "publishedAt": "2023-11-02 22:05:44.425+00",
+    "createdAt": "2023-11-02T22:05:44.48Z",
+    "updatedAt": "2025-12-18T02:16:07.272421Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "101893",
+    "label": "Bybit Hack",
+    "slug": "bybit-hack",
+    "forceShow": false,
+    "createdAt": "2025-02-21T16:52:00.404335Z",
+    "updatedAt": "2025-12-18T03:09:22.613004Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "364",
+    "label": "ayatollah khamenei",
+    "slug": "ayatollah-khamenei",
+    "publishedAt": "2023-11-02 22:05:32.3+00",
+    "createdAt": "2023-11-02T22:05:32.325Z",
+    "updatedAt": "2025-12-18T02:16:16.806141Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "347",
+    "label": "bears",
+    "slug": "bears",
+    "publishedAt": "2023-11-02 21:59:11.151+00",
+    "createdAt": "2023-11-02T21:59:11.16Z",
+    "updatedAt": "2025-12-18T02:16:16.807937Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "1149",
+    "label": "wrestling",
+    "slug": "wrestling",
+    "publishedAt": "2024-02-06 19:50:20.552+00",
+    "createdAt": "2024-02-06T19:50:20.557Z",
+    "updatedAt": "2025-12-18T02:16:16.809025Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "1027",
+    "label": "electoral votes",
+    "slug": "electoral-votes",
+    "publishedAt": "2024-02-06 19:30:05.824+00",
+    "createdAt": "2024-02-06T19:30:05.847Z",
+    "updatedAt": "2025-12-18T02:16:16.810051Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "756",
+    "label": "Epstein",
+    "slug": "epstein",
+    "forceShow": false,
+    "publishedAt": "2023-12-19 19:50:47.215+00",
+    "createdAt": "2023-12-19T19:50:47.236Z",
+    "updatedAt": "2025-12-18T03:09:22.613855Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "325",
+    "label": "democratic presidential nomination",
+    "slug": "democratic-presidential-nomination",
+    "publishedAt": "2023-11-02 21:54:56.38+00",
+    "createdAt": "2023-11-02T21:54:56.403Z",
+    "updatedAt": "2025-12-23T19:35:30.9825Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "1179",
+    "label": "detroit lions",
+    "slug": "detroit-lions",
+    "publishedAt": "2024-02-06 19:55:46.227+00",
+    "createdAt": "2024-02-06T19:55:46.248Z",
+    "updatedAt": "2025-12-23T19:35:30.984083Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "207",
+    "label": "dating",
+    "slug": "dating",
+    "publishedAt": "2023-11-02 21:35:57.945+00",
+    "createdAt": "2023-11-02T21:35:57.968Z",
+    "updatedAt": "2025-12-23T19:35:30.984844Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "330",
+    "label": "season finale",
+    "slug": "season-finale",
+    "publishedAt": "2023-11-02 21:55:36.103+00",
+    "createdAt": "2023-11-02T21:55:36.11Z",
+    "updatedAt": "2025-12-23T19:35:30.985546Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "379",
+    "label": "disclosure",
+    "slug": "disclosure",
+    "publishedAt": "2023-11-02 22:08:31.873+00",
+    "createdAt": "2023-11-02T22:08:31.901Z",
+    "updatedAt": "2025-12-23T19:35:30.986116Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "384",
+    "label": "seahawks",
+    "slug": "seahawks",
+    "publishedAt": "2023-11-02 22:09:58.239+00",
+    "createdAt": "2023-11-02T22:09:58.271Z",
+    "updatedAt": "2025-12-23T19:35:30.986695Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "966",
+    "label": "warpcast",
+    "slug": "warpcast",
+    "publishedAt": "2024-02-06 17:24:52.441+00",
+    "createdAt": "2024-02-06T17:24:52.466Z",
+    "updatedAt": "2025-12-18T02:37:54.914476Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "964",
+    "label": "market trends",
+    "slug": "market-trends",
+    "publishedAt": "2024-02-06 17:24:50.018+00",
+    "createdAt": "2024-02-06T17:24:50.031Z",
+    "updatedAt": "2025-12-18T02:37:54.918593Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "705",
+    "label": "wonka",
+    "slug": "wonka",
+    "publishedAt": "2023-12-11 23:17:10.82+00",
+    "createdAt": "2023-12-11T23:17:10.837Z",
+    "updatedAt": "2025-12-18T02:37:54.920034Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "759",
+    "label": "u.s. supreme court",
+    "slug": "uptspt-supreme-court",
+    "publishedAt": "2023-12-20 00:43:40.794+00",
+    "createdAt": "2023-12-20T00:43:41.067Z",
+    "updatedAt": "2025-12-18T02:37:54.923909Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "953",
+    "label": "deals",
+    "slug": "deals",
+    "publishedAt": "2024-02-02 00:43:59.06+00",
+    "createdAt": "2024-02-02T00:43:59.076Z",
+    "updatedAt": "2025-12-18T02:37:54.925029Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "100460",
+    "label": "NC",
+    "slug": "nc",
+    "createdAt": "2024-09-16T17:20:45.879661Z",
+    "updatedAt": "2025-12-18T02:37:58.094476Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "870",
+    "label": "usdt",
+    "slug": "usdt",
+    "publishedAt": "2024-01-17 16:43:07.552+00",
+    "createdAt": "2024-01-17T16:43:07.559Z",
+    "updatedAt": "2025-12-18T02:41:36.53853Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "905",
+    "label": "minouche shafik",
+    "slug": "minouche-shafik",
+    "publishedAt": "2024-01-24 20:29:28.944+00",
+    "createdAt": "2024-01-24T20:29:29.721Z",
+    "updatedAt": "2025-12-18T02:41:36.539532Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "889",
+    "label": "evloev",
+    "slug": "evloev",
+    "publishedAt": "2024-01-18 00:17:13.954+00",
+    "createdAt": "2024-01-18T00:17:13.958Z",
+    "updatedAt": "2025-12-18T02:41:36.540397Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "1232",
+    "label": "asa hutchinson",
+    "slug": "asa-hutchinson",
+    "publishedAt": "2024-02-06 20:04:09.056+00",
+    "createdAt": "2024-02-06T20:04:09.071Z",
+    "updatedAt": "2025-12-18T02:41:36.542807Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "101480",
+    "label": "alien",
+    "slug": "alien",
+    "createdAt": "2024-12-12T17:08:40.083098Z",
+    "updatedAt": "2025-12-18T02:41:36.543895Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "871",
+    "label": "vice president",
+    "slug": "vice-president",
+    "publishedAt": "2024-01-17 17:17:29.807+00",
+    "createdAt": "2024-01-17T17:17:29.843Z",
+    "updatedAt": "2025-12-18T02:41:39.073563Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "582",
+    "label": "houthis",
+    "slug": "houthis",
+    "publishedAt": "2023-11-28 17:17:34.313+00",
+    "createdAt": "2023-11-28T17:17:34.34Z",
+    "updatedAt": "2025-12-18T02:45:49.603473Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "100570",
+    "label": "cramer",
+    "slug": "cramer",
+    "createdAt": "2024-09-19T22:08:49.728082Z",
+    "updatedAt": "2025-12-18T02:45:49.606658Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "100410",
+    "label": "Europe",
+    "slug": "europe",
+    "createdAt": "2024-09-03T23:38:52.652644Z",
+    "updatedAt": "2025-12-18T02:45:49.610638Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "487",
+    "label": "house of representatives",
+    "slug": "house-of-representatives",
+    "publishedAt": "2023-11-12 19:12:04.593+00",
+    "createdAt": "2023-11-12T19:12:04.601Z",
+    "updatedAt": "2025-12-18T02:45:49.61178Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "100431",
+    "label": "Rap",
+    "slug": "rap",
+    "createdAt": "2024-09-09T15:18:53.803919Z",
+    "updatedAt": "2025-12-18T02:45:49.612907Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "100589",
+    "label": "elliot",
+    "slug": "elliot",
+    "createdAt": "2024-09-19T22:13:50.314298Z",
+    "updatedAt": "2025-12-18T02:45:53.798286Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "100510",
+    "label": "charlestin",
+    "slug": "charlestin",
+    "createdAt": "2024-09-19T20:45:30.428659Z",
+    "updatedAt": "2025-12-18T02:47:23.346817Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "1552",
+    "label": "carl sherman",
+    "slug": "carl-sherman",
+    "publishedAt": "2024-03-01 21:23:31.731+00",
+    "createdAt": "2024-03-01T21:23:31.745Z",
+    "updatedAt": "2025-12-18T02:47:29.204769Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "915",
+    "label": "international aid",
+    "slug": "international-aid",
+    "publishedAt": "2024-01-26 00:57:06.969+00",
+    "createdAt": "2024-01-26T00:57:06.997Z",
+    "updatedAt": "2025-12-18T02:49:35.695097Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "828",
+    "label": "international business",
+    "slug": "international-business",
+    "publishedAt": "2024-01-03 16:39:44.302+00",
+    "createdAt": "2024-01-03T16:39:44.327Z",
+    "updatedAt": "2025-12-18T02:49:35.695703Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "1346",
+    "label": "international conflicts",
+    "slug": "international-conflicts",
+    "publishedAt": "2024-02-15 20:52:14.86+00",
+    "createdAt": "2024-02-15T20:52:14.877Z",
+    "updatedAt": "2025-12-18T02:49:35.696243Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "859",
+    "label": "international law",
+    "slug": "international-law",
+    "publishedAt": "2024-01-11 15:58:39.339+00",
+    "createdAt": "2024-01-11T15:58:39.351Z",
+    "updatedAt": "2025-12-18T02:49:35.696798Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "778",
+    "label": "international trade",
+    "slug": "international-trade",
+    "publishedAt": "2023-12-21 17:24:05.696+00",
+    "createdAt": "2023-12-21T17:24:05.745Z",
+    "updatedAt": "2025-12-18T02:49:35.697336Z",
+    "requiresTranslation": false
+  },
+  {
+    "id": "584",
+    "label": "international travel",
+    "slug": "international-travel",
+    "publishedAt": "2023-11-28 18:46:15.272+00",
+    "createdAt": "2023-11-28T18:46:15.294Z",
+    "updatedAt": "2025-12-18T02:49:39.557793Z",
+    "requiresTranslation": false
+  }
+]

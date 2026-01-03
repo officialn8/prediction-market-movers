@@ -3,6 +3,11 @@ from typing import Optional
 import uuid
 import pandas as pd
 import streamlit as st
+import altair as alt
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo
 
 try:
     from streamlit_javascript import st_javascript
@@ -46,10 +51,44 @@ def get_session_id() -> str:
     return uid
 
 
+def get_user_timezone() -> str:
+    """Get the user's timezone from the browser."""
+    if 'user_timezone' in st.session_state:
+        return st.session_state.user_timezone
+        
+    try:
+        tz = st_javascript("Intl.DateTimeFormat().resolvedOptions().timeZone", key="get_tz_js")
+        if tz:
+            st.session_state.user_timezone = tz
+            return tz
+    except Exception:
+        pass
+        
+    return "UTC"
+
+
+def to_user_tz(dt: datetime) -> datetime:
+    """Convert a datetime to the user's timezone."""
+    if dt is None:
+        return None
+        
+    # Ensure dt is timezone-aware and in UTC
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+    
+    user_tz = get_user_timezone()
+    try:
+        return dt.astimezone(ZoneInfo(user_tz))
+    except Exception:
+        return dt # Fallback
+
+
 def init_watchlist():
     """Initialize watchlist from database using session ID."""
     if 'watchlist_initialized' not in st.session_state:
         uid = get_session_id()
+        # Trigger timezone fetch early
+        get_user_timezone() 
         
         # Load from DB
         items = WatchlistQueries.get_all(uid)
@@ -99,83 +138,62 @@ def get_watchlist() -> dict:
         return {}
 
 
-def generate_reason(pct_change: float, volume: float, outcome: str) -> str:
-    """Generate a readable reason for the move."""
-    direction = "spiked" if pct_change > 0 else "dropped"
-    abs_pct = abs(pct_change)
+def render_mover_list_item(mover: dict, show_watchlist: bool = True) -> None:
+    """
+    Render a simplified list item for a mover (The 'Killer View').
+    Format: [Change Badge] [Title] [Price Flow] [Actions]
+    """
+    market_id = str(mover.get("market_id", ""))
+    token_id = mover.get("token_id")
+    title = mover.get('title', 'Unknown Market')
     
-    # Simplify volume
-    if volume >= 1_000_000:
-        vol_str = f"${volume/1_000_000:.1f}M"
-    elif volume >= 1_000:
-        vol_str = f"${volume/1_000:.1f}k"
-    else:
-        vol_str = f"${volume:.0f}"
-        
-    return f"**{outcome}** {direction} **{abs_pct:.1f}%** on {vol_str} vol"
-
-
-def render_mover_card(mover: dict, show_watchlist: bool = True) -> None:
-    """Render a single mover card with toggleable details."""
+    # Extract Data
     pct_change = float(mover.get("pct_change", 0))
-    change_class = "positive" if pct_change > 0 else "negative"
-    change_sign = "+" if pct_change > 0 else ""
-
-    source = mover.get("source", "unknown")
-    source_class = f"source-{source}"
-
-    outcome = mover.get("outcome", "YES")
-    outcome_class = "outcome-yes" if outcome == "YES" else "outcome-no"
-
     latest_price = float(mover.get("latest_price", 0))
     old_price = float(mover.get("old_price", 0))
-
-    # Try to get volume from various keys (cache vs raw SQL might differ)
-    volume = float(mover.get("latest_volume") or mover.get("volume_24h") or 0)
-
-    reason = generate_reason(pct_change, volume, outcome)
-
-    market_id = str(mover.get("market_id", ""))
-    title = mover.get('title', 'Unknown Market')
-    token_id = mover.get("token_id")
-
-    # Check if in watchlist
+    
+    # Colors & Sign
+    if pct_change > 0:
+        color = "🟢"
+        sign = "+"
+        change_class = "positive"
+    elif pct_change < 0:
+        color = "🔴"
+        sign = ""
+        change_class = "negative"
+    else:
+        color = "⚪"
+        sign = ""
+        change_class = "neutral"
+        
+    change_text = f"{color} {sign}{pct_change:.0f}%" # Rounded per design
+    prices_text = f"{int(old_price*100)}¢→{int(latest_price*100)}¢" # Cents per design
+    
+    # Check Watchlist
     in_watchlist = is_in_watchlist(market_id) if market_id else False
-    star_icon = "★" if in_watchlist else "☆"
-
-    # Render the card HTML
-    st.markdown(f"""
-    <div class="mover-card" style="background: linear-gradient(135deg, #12121a 0%, #1a1a24 100%); border: 1px solid #2a2a3a; border-radius: 12px; padding: 1.25rem; margin-bottom: 0.5rem;">
-        <div style="display: flex; justify-content: space-between; align-items: flex-start;">
-            <div style="flex: 1;">
-                <div>
-                    <span class="source-tag {source_class}" style="display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.7rem; font-weight: 600; text-transform: uppercase; background: rgba(168, 85, 247, 0.2); color: #a855f7;">{source}</span>
-                    <span class="outcome-tag {outcome_class}" style="display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.7rem; font-weight: 600; margin-left: 0.5rem; background: {'rgba(0, 212, 170, 0.15); color: #00d4aa;' if outcome == 'YES' else 'rgba(255, 71, 87, 0.15); color: #ff4757;'}">{outcome}</span>
-                </div>
-                <p class="market-title" style="font-family: 'Space Grotesk', sans-serif; font-size: 1rem; font-weight: 500; color: #e4e4e7; margin-bottom: 0.5rem; line-height: 1.4;">{title}</p>
-                <p class="price-info" style="font-family: 'JetBrains Mono', monospace; font-size: 0.85rem; color: #71717a;">
-                    ${old_price:.2f} → ${latest_price:.2f}
-                </p>
-                <div style="margin-top: 0.5rem; font-size: 0.85rem; color: #a1a1aa;">
-                    ℹ️ {reason}
-                </div>
-            </div>
-            <div style="text-align: right;">
-                <p class="price-change {change_class}" style="font-family: 'JetBrains Mono', monospace; font-size: 1.5rem; font-weight: 600; color: {'#00d4aa' if pct_change > 0 else '#ff4757'};">{change_sign}{pct_change:.1f}%</p>
-                <p class="price-info" style="margin-top: 0;">{mover.get('category', 'Uncategorized')}</p>
-            </div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # Actions & Details Expander (Task 2)
-    # Using a unique key for the expander to avoid conflicts
-    with st.expander("📊 View Details & Actions"):
-        c1, c2 = st.columns([2, 1])
+    
+    # Render Container
+    with st.container():
+        # Adjust column ratios for the list view
+        c1, c2, c3, c4 = st.columns([0.15, 0.50, 0.20, 0.15])
         
         with c1:
-            if token_id:
-                # Fetch history for mini-chart
+            st.markdown(f"**{change_text}**")
+            
+        with c2:
+            st.markdown(f"{title}")
+            
+        with c3:
+            st.markdown(f"**{prices_text}**")
+            
+        with c4:
+            pass
+
+    # The expander must be outside the columns to span full width
+    with st.expander("Expand Details", expanded=False):
+        c_chart, c_actions = st.columns([3, 1])
+        with c_chart:
+             if token_id:
                 try:
                     hist = MarketQueries.get_snapshots_range(
                         token_id, 
@@ -183,25 +201,42 @@ def render_mover_card(mover: dict, show_watchlist: bool = True) -> None:
                     )
                     if hist:
                         df = pd.DataFrame(hist)
+                        
+                        # Convert to user timezone
                         df['ts'] = pd.to_datetime(df['ts'])
-                        # Simple line chart
-                        st.line_chart(df.set_index('ts')['price'], height=150)
-                    else:
-                        st.caption("No recent history available.")
+                        df['ts'] = df['ts'].apply(lambda x: to_user_tz(x))
+                        
+                        df['price'] = df['price'].astype(float)
+                        
+                        # Create Altair Sparkline
+                        # Minimal tooltip, no axes
+                        chart = alt.Chart(df).mark_line().encode(
+                            x=alt.X('ts', axis=None),
+                            y=alt.Y('price', axis=None, scale=alt.Scale(zero=False)),
+                            tooltip=[
+                                alt.Tooltip('ts', title='Date', format='%b %d %H:%M'),
+                                alt.Tooltip('price', title='Price', format='$.3f')
+                            ]
+                        ).properties(
+                            height=150
+                        ).configure_view(
+                            strokeWidth=0  # Remove border
+                        )
+                        
+                        st.altair_chart(chart, use_container_width=True)
+                        
                 except Exception:
-                    st.caption("Error loading history.")
-            else:
-                st.caption("Token ID missing.")
-                
-        with c2:
-            st.write("Actions")
-            if show_watchlist and market_id:
-                btn_len = "Remove Watchlist" if in_watchlist else "Add Watchlist"
-                if st.button(btn_len, key=f"mini_watch_{market_id}_{outcome}", use_container_width=True):
-                    toggle_watchlist(market_id, title, source)
+                    st.caption("Chart unavailable")
+        
+        with c_actions:
+             if show_watchlist:
+                lbl = "Remove Watchlist" if in_watchlist else "Add Watchlist"
+                if st.button(lbl, key=f"wl_{market_id}_{token_id}"):
+                    toggle_watchlist(market_id, title, mover.get("source", "unknown"))
                     st.rerun()
-            
-            if st.button("Full Market Page", key=f"mini_view_{market_id}", use_container_width=True):
-                # We can't easily pass state via switch_page until latest Streamlit, but we can set session state
-                st.session_state["selected_market_id"] = market_id
-                st.switch_page("pages/2_Market_Detail.py")
+             
+             if st.button("Full Page", key=f"fp_{market_id}_{token_id}"):
+                 st.session_state["selected_market_id"] = market_id
+                 st.switch_page("pages/2_Market_Detail.py")
+                 
+    st.markdown("---") # Divider between rows
