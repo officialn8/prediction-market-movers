@@ -1034,61 +1034,385 @@ class OHLCQueries:
             # Use 1-hour candles for longer timeframes
             return OHLCQueries.get_1h_candles(token_id, start_ts, end_ts)
 
+
 @dataclass
-class WatchlistQueries:
+class VolumeQueries:
     """
-    SQL queries for user watchlist management.
+    SQL query methods for volume analysis and spike detection.
     """
 
     @staticmethod
-    def add(user_session_id: str, market_id: str) -> bool:
-        """Add a market to user watchlist."""
-        db = get_db_pool()
-        query = """
-            INSERT INTO user_watchlist (user_session_id, market_id)
-            VALUES (%s, %s)
-            ON CONFLICT (user_session_id, market_id) DO NOTHING
+    def get_volume_averages(token_ids: Optional[list[UUID]] = None) -> list[dict]:
         """
+        Get 7-day average volume for tokens.
+
+        Uses the volume_averages view created in migration 007.
+        Falls back to direct query if view doesn't exist.
+
+        Args:
+            token_ids: Optional list of specific tokens to query
+
+        Returns:
+            List of dicts with token_id, avg_volume_7d, stddev_volume_7d, etc.
+        """
+        db = get_db_pool()
+
+        if token_ids:
+            placeholders = ','.join(['%s'] * len(token_ids))
+            query = f"""
+                SELECT * FROM volume_averages
+                WHERE token_id IN ({placeholders})
+            """
+            params = [str(tid) for tid in token_ids]
+        else:
+            query = "SELECT * FROM volume_averages"
+            params = []
+
         try:
-            db.execute(query, (user_session_id, str(market_id)))
-            return True
+            return db.execute(query, tuple(params) if params else None, fetch=True) or []
         except Exception:
-            return False
+            # View might not exist yet, use fallback query
+            return VolumeQueries._get_volume_averages_fallback(token_ids)
 
     @staticmethod
-    def remove(user_session_id: str, market_id: str) -> bool:
-        """Remove a market from user watchlist."""
+    def _get_volume_averages_fallback(token_ids: Optional[list[UUID]] = None) -> list[dict]:
+        """Fallback query if volume_averages view doesn't exist."""
         db = get_db_pool()
-        query = """
-            DELETE FROM user_watchlist 
-            WHERE user_session_id = %s AND market_id = %s
+
+        token_filter = ""
+        params = []
+        if token_ids:
+            placeholders = ','.join(['%s'] * len(token_ids))
+            token_filter = f"AND s.token_id IN ({placeholders})"
+            params = [str(tid) for tid in token_ids]
+
+        query = f"""
+            WITH daily_volumes AS (
+                SELECT DISTINCT ON (token_id, DATE(ts))
+                    token_id,
+                    volume_24h,
+                    ts
+                FROM snapshots
+                WHERE ts > NOW() - INTERVAL '7 days'
+                  AND volume_24h IS NOT NULL
+                  AND volume_24h > 0
+                  {token_filter}
+                ORDER BY token_id, DATE(ts), ts DESC
+            )
+            SELECT
+                token_id,
+                AVG(volume_24h) as avg_volume_7d,
+                STDDEV(volume_24h) as stddev_volume_7d,
+                MAX(volume_24h) as max_volume_7d,
+                MIN(volume_24h) as min_volume_7d,
+                COUNT(*) as sample_count
+            FROM daily_volumes
+            GROUP BY token_id
+            HAVING COUNT(*) >= 2
         """
-        db.execute(query, (user_session_id, str(market_id)))
-        return True
+        return db.execute(query, tuple(params) if params else None, fetch=True) or []
 
     @staticmethod
-    def get_all(user_session_id: str) -> list[dict]:
-        """Get all watched markets for a session."""
+    def get_current_volumes(limit: int = 500) -> list[dict]:
+        """
+        Get current volume for all active tokens with market context.
+
+        Returns latest volume snapshot for each token along with market info.
+        """
         db = get_db_pool()
+
         query = """
-            SELECT 
-                uw.market_id,
-                uw.added_at,
+            SELECT DISTINCT ON (mt.token_id)
+                mt.token_id,
+                mt.market_id,
+                mt.outcome,
                 m.title,
                 m.source,
                 m.category,
-                m.status
-            FROM user_watchlist uw
-            JOIN markets m ON uw.market_id = m.market_id
-            WHERE uw.user_session_id = %s
-            ORDER BY uw.added_at DESC
+                s.volume_24h as current_volume,
+                s.price as current_price,
+                s.ts as snapshot_ts
+            FROM market_tokens mt
+            JOIN markets m ON mt.market_id = m.market_id
+            JOIN snapshots s ON mt.token_id = s.token_id
+            WHERE m.status = 'active'
+              AND s.volume_24h IS NOT NULL
+              AND (m.end_date IS NULL OR m.end_date > NOW() + INTERVAL '24 hours')
+            ORDER BY mt.token_id, s.ts DESC
+            LIMIT %s
         """
-        return db.execute(query, (user_session_id,), fetch=True) or []
-    
+        return db.execute(query, (limit,), fetch=True) or []
+
     @staticmethod
-    def clear(user_session_id: str) -> bool:
-        """Clear entire watchlist for a session."""
+    def get_volume_spike_candidates(
+        min_spike_ratio: float = 2.0,
+        min_volume: float = 1000.0,
+        limit: int = 100,
+    ) -> list[dict]:
+        """
+        Find tokens with volume significantly above their historical average.
+
+        Args:
+            min_spike_ratio: Minimum ratio of current/avg volume (e.g., 2.0 = 2x normal)
+            min_volume: Minimum absolute volume to consider
+            limit: Max results to return
+
+        Returns:
+            List of tokens with spike detected, sorted by spike_ratio DESC
+        """
         db = get_db_pool()
-        query = "DELETE FROM user_watchlist WHERE user_session_id = %s"
-        db.execute(query, (user_session_id,))
-        return True
+
+        query = """
+            WITH current AS (
+                SELECT DISTINCT ON (token_id)
+                    token_id,
+                    volume_24h as current_volume,
+                    price as current_price,
+                    ts
+                FROM snapshots
+                WHERE volume_24h IS NOT NULL
+                ORDER BY token_id, ts DESC
+            ),
+            averages AS (
+                SELECT
+                    s.token_id,
+                    AVG(s.volume_24h) as avg_volume,
+                    STDDEV(s.volume_24h) as stddev_volume
+                FROM (
+                    SELECT DISTINCT ON (token_id, DATE(ts))
+                        token_id,
+                        volume_24h
+                    FROM snapshots
+                    WHERE ts > NOW() - INTERVAL '7 days'
+                      AND ts < NOW() - INTERVAL '1 day'  -- Exclude last 24h from avg
+                      AND volume_24h IS NOT NULL
+                      AND volume_24h > 0
+                    ORDER BY token_id, DATE(ts), ts DESC
+                ) s
+                GROUP BY s.token_id
+                HAVING COUNT(*) >= 2
+            ),
+            spikes AS (
+                SELECT
+                    c.token_id,
+                    c.current_volume,
+                    c.current_price,
+                    a.avg_volume,
+                    a.stddev_volume,
+                    CASE
+                        WHEN a.avg_volume > 0 THEN c.current_volume / a.avg_volume
+                        ELSE NULL
+                    END as spike_ratio
+                FROM current c
+                JOIN averages a ON c.token_id = a.token_id
+                WHERE c.current_volume >= %s
+            )
+            SELECT
+                sp.*,
+                mt.market_id,
+                mt.outcome,
+                m.title,
+                m.source,
+                m.category,
+                m.url
+            FROM spikes sp
+            JOIN market_tokens mt ON sp.token_id = mt.token_id
+            JOIN markets m ON mt.market_id = m.market_id
+            WHERE sp.spike_ratio >= %s
+              AND m.status = 'active'
+              AND (m.end_date IS NULL OR m.end_date > NOW() + INTERVAL '24 hours')
+            ORDER BY sp.spike_ratio DESC
+            LIMIT %s
+        """
+        return db.execute(query, (min_volume, min_spike_ratio, limit), fetch=True) or []
+
+    @staticmethod
+    def insert_volume_spike(
+        token_id: UUID,
+        current_volume: Decimal,
+        avg_volume: Decimal,
+        spike_ratio: Decimal,
+        current_price: Optional[Decimal] = None,
+        price_change_1h: Optional[Decimal] = None,
+        severity: str = "medium",
+    ) -> dict:
+        """Insert a detected volume spike record."""
+        db = get_db_pool()
+
+        query = """
+            INSERT INTO volume_spikes (
+                token_id, current_volume, avg_volume, spike_ratio,
+                current_price, price_change_1h, severity
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
+        """
+        result = db.execute(
+            query,
+            (str(token_id), current_volume, avg_volume, spike_ratio,
+             current_price, price_change_1h, severity),
+            fetch=True,
+        )
+        return result[0] if result else {}
+
+    @staticmethod
+    def get_recent_volume_spikes(
+        limit: int = 50,
+        min_severity: str = "low",
+        unacknowledged_only: bool = False,
+    ) -> list[dict]:
+        """Get recent volume spikes with market context."""
+        db = get_db_pool()
+
+        severity_order = {"low": 1, "medium": 2, "high": 3, "extreme": 4}
+        min_level = severity_order.get(min_severity, 1)
+
+        # Build severity filter
+        valid_severities = [s for s, level in severity_order.items() if level >= min_level]
+        severity_placeholders = ','.join(['%s'] * len(valid_severities))
+
+        ack_filter = "AND vs.acknowledged_at IS NULL" if unacknowledged_only else ""
+
+        query = f"""
+            SELECT
+                vs.*,
+                mt.market_id,
+                mt.outcome,
+                m.title,
+                m.source,
+                m.category,
+                m.url
+            FROM volume_spikes vs
+            JOIN market_tokens mt ON vs.token_id = mt.token_id
+            JOIN markets m ON mt.market_id = m.market_id
+            WHERE vs.severity IN ({severity_placeholders})
+              {ack_filter}
+            ORDER BY vs.created_at DESC
+            LIMIT %s
+        """
+        params = valid_severities + [limit]
+        return db.execute(query, tuple(params), fetch=True) or []
+
+    @staticmethod
+    def get_recent_spike_for_token(
+        token_id: UUID,
+        lookback_minutes: int = 60,
+    ) -> Optional[dict]:
+        """
+        Check if a volume spike was recently recorded for this token.
+        Used for deduplication.
+        """
+        db = get_db_pool()
+
+        query = """
+            SELECT * FROM volume_spikes
+            WHERE token_id = %s
+              AND created_at > NOW() - (%s * INTERVAL '1 minute')
+            ORDER BY created_at DESC
+            LIMIT 1
+        """
+        result = db.execute(query, (str(token_id), lookback_minutes), fetch=True)
+        return result[0] if result else None
+
+    @staticmethod
+    def get_movers_with_volume_context(
+        window_seconds: int = 3600,
+        limit: int = 50,
+        source: Optional[str] = None,
+    ) -> list[dict]:
+        """
+        Get top movers enriched with volume spike information.
+
+        Combines price movement data with volume analysis for comprehensive view.
+        """
+        db = get_db_pool()
+
+        source_filter = "AND m.source = %s" if source else ""
+        expiry_filter = "AND (m.end_date IS NULL OR m.end_date > NOW() + INTERVAL '24 hours')"
+
+        query = f"""
+            WITH latest AS (
+                SELECT DISTINCT ON (token_id)
+                    token_id,
+                    ts as latest_ts,
+                    price as latest_price,
+                    volume_24h as current_volume
+                FROM snapshots
+                ORDER BY token_id, ts DESC
+            ),
+            historical AS (
+                SELECT DISTINCT ON (token_id)
+                    token_id,
+                    price as old_price
+                FROM snapshots
+                WHERE ts <= NOW() - (%s * INTERVAL '1 second')
+                ORDER BY token_id, ts DESC
+            ),
+            volume_avgs AS (
+                SELECT
+                    token_id,
+                    AVG(volume_24h) as avg_volume
+                FROM (
+                    SELECT DISTINCT ON (token_id, DATE(ts))
+                        token_id,
+                        volume_24h
+                    FROM snapshots
+                    WHERE ts > NOW() - INTERVAL '7 days'
+                      AND ts < NOW() - INTERVAL '1 day'
+                      AND volume_24h IS NOT NULL
+                      AND volume_24h > 0
+                    ORDER BY token_id, DATE(ts), ts DESC
+                ) daily
+                GROUP BY token_id
+                HAVING COUNT(*) >= 2
+            ),
+            changes AS (
+                SELECT
+                    l.token_id,
+                    l.latest_ts,
+                    l.latest_price,
+                    l.current_volume,
+                    h.old_price,
+                    va.avg_volume,
+                    CASE
+                        WHEN h.old_price > 0 THEN
+                            ROUND(((l.latest_price - h.old_price) / h.old_price * 100)::numeric, 2)
+                        ELSE NULL
+                    END as pct_change,
+                    CASE
+                        WHEN va.avg_volume > 0 AND l.current_volume IS NOT NULL THEN
+                            ROUND((l.current_volume / va.avg_volume)::numeric, 2)
+                        ELSE NULL
+                    END as volume_spike_ratio
+                FROM latest l
+                JOIN historical h ON l.token_id = h.token_id
+                LEFT JOIN volume_avgs va ON l.token_id = va.token_id
+            )
+            SELECT
+                c.*,
+                mt.market_id,
+                mt.outcome,
+                m.title,
+                m.source,
+                m.category,
+                m.url
+            FROM changes c
+            JOIN market_tokens mt ON c.token_id = mt.token_id
+            JOIN markets m ON mt.market_id = m.market_id
+            WHERE m.status = 'active'
+              AND c.pct_change IS NOT NULL
+              {source_filter}
+              {expiry_filter}
+            ORDER BY
+                -- Composite ranking: combine price move with volume spike
+                ABS(c.pct_change) * COALESCE(LN(c.current_volume + 1), 1) *
+                CASE WHEN c.volume_spike_ratio > 1.5 THEN c.volume_spike_ratio ELSE 1 END DESC
+            LIMIT %s
+        """
+
+        params = [window_seconds]
+        if source:
+            params.append(source)
+        params.append(limit)
+
+        return db.execute(query, tuple(params), fetch=True) or []
