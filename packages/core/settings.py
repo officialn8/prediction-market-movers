@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     database_url: str = Field(
         default="postgresql://pmuser:pmpass@localhost:5432/prediction_movers",
         description="PostgreSQL connection string",
+        validation_alias="DATABASE_URL",
     )
     db_pool_min_size: int = Field(default=2, ge=1, le=10)
     db_pool_max_size: int = Field(default=10, ge=2, le=50)

@@ -100,6 +100,20 @@ class MarketQueries:
         """
         return db.execute(query, tuple(params), fetch=True) or []
     
+    @staticmethod
+    def search_markets(query: str, limit: int = 20) -> list[dict]:
+        """Search markets by title or category."""
+        db = get_db_pool()
+        sql = """
+            SELECT m.*
+            FROM markets m
+            WHERE (m.title ILIKE %s OR m.category ILIKE %s)
+            AND m.status = 'active'
+            LIMIT %s
+        """
+        search_term = f"%{query}%"
+        return db.execute(sql, (search_term, search_term, limit), fetch=True) or []
+    
     # =========================================================================
     # TOKEN OPERATIONS
     # =========================================================================
@@ -203,6 +217,7 @@ class MarketQueries:
         query = """
             INSERT INTO snapshots (token_id, price, volume_24h, spread)
             VALUES (%s, %s, %s, %s)
+            ON CONFLICT DO NOTHING
         """
         params_seq = [
             (
@@ -698,6 +713,7 @@ class AnalyticsQueries:
         window_seconds: int = 3600,
         limit: int = 20,
         source: Optional[str] = None,
+        category: Optional[str] = None,
         direction: str = "both",
     ) -> list[dict]:
         """
@@ -707,6 +723,7 @@ class AnalyticsQueries:
         db = get_db_pool()
         
         source_filter = "AND m.source = %s" if source else ""
+        category_filter = "AND m.category = %s" if category else ""
         
         if direction == "gainers":
             direction_filter = "AND mc.move_pp > 0"
@@ -740,6 +757,7 @@ class AnalyticsQueries:
             JOIN markets m ON mt.market_id = m.market_id
             WHERE mc.window_seconds = %s
               {source_filter}
+              {category_filter}
               {direction_filter}
             ORDER BY mc.rank ASC -- Pre-calculated rank
             LIMIT %s
@@ -748,6 +766,8 @@ class AnalyticsQueries:
         params = [window_seconds, window_seconds]
         if source:
             params.append(source)
+        if category:
+            params.append(category)
         params.append(limit)
 
         return db.execute(query, tuple(params), fetch=True) or []

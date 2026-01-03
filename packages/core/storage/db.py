@@ -50,7 +50,19 @@ class DatabasePool:
         
         db_url = conninfo or settings.database_url
         
-        logger.info("Initializing database connection pool...")
+        # Mask password for logging
+        from urllib.parse import urlparse, urlunparse
+        try:
+            parsed = urlparse(db_url)
+            if parsed.password:
+                masked_netloc = parsed.netloc.replace(f":{parsed.password}@", ":***@")
+                masked_url = urlunparse(parsed._replace(netloc=masked_netloc))
+            else:
+                masked_url = db_url
+            logger.info(f"Initializing database connection pool with URL: {masked_url}")
+        except Exception:
+            logger.info("Initializing database connection pool... (URL masking failed)")
+
         self._pool = ConnectionPool(
             conninfo=db_url,
             min_size=settings.db_pool_min_size,

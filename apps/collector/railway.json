@@ -1,0 +1,9 @@
+{
+    "build": {
+        "builder": "DOCKERFILE",
+        "dockerfilePath": "apps/collector/Dockerfile"
+    },
+    "deploy": {
+        "restartPolicyType": "ON_FAILURE"
+    }
+}

@@ -1,21 +1,117 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
+import uuid
+import pandas as pd
 import streamlit as st
+import altair as alt
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo
+
+try:
+    from streamlit_javascript import st_javascript
+except ImportError:
+    # Fallback to avoid crash if dependency is missing
+    def st_javascript(js_code, key=None):
+        return None
+
+from packages.core.storage.queries import WatchlistQueries, MarketQueries
+
+
+def get_session_id() -> str:
+    """Get persistent session ID using localStorage or generate new."""
+    if 'user_session_id' in st.session_state:
+        return st.session_state.user_session_id
+    
+    # Attempt to retrieve from localStorage
+    try:
+        uid_from_js = st_javascript("localStorage.getItem('pm_movers_uid')", key="get_uid_js")
+    except Exception:
+        uid_from_js = None
+
+    if uid_from_js:
+        st.session_state.user_session_id = uid_from_js
+        return uid_from_js
+        
+    # If not found or not yet returned, generate new one to use immediately
+    if 'temp_uid' not in st.session_state:
+        st.session_state.temp_uid = str(uuid.uuid4())
+    
+    # We return the temp UID but also try to save it. 
+    # If the user refreshes, they might get the saved one.
+    uid = st.session_state.temp_uid
+    st.session_state.user_session_id = uid
+    
+    try:
+        st_javascript(f"localStorage.setItem('pm_movers_uid', '{uid}')", key="set_uid_js")
+    except Exception:
+        pass
+        
+    return uid
+
+
+def get_user_timezone() -> str:
+    """Get the user's timezone from the browser."""
+    if 'user_timezone' in st.session_state:
+        return st.session_state.user_timezone
+        
+    try:
+        tz = st_javascript("Intl.DateTimeFormat().resolvedOptions().timeZone", key="get_tz_js")
+        if tz:
+            st.session_state.user_timezone = tz
+            return tz
+    except Exception:
+        pass
+        
+    return "UTC"
+
+
+def to_user_tz(dt: datetime) -> datetime:
+    """Convert a datetime to the user's timezone."""
+    if dt is None:
+        return None
+        
+    # Ensure dt is timezone-aware and in UTC
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+    
+    user_tz = get_user_timezone()
+    try:
+        return dt.astimezone(ZoneInfo(user_tz))
+    except Exception:
+        return dt # Fallback
 
 
 def init_watchlist():
-    """Initialize watchlist in session state if not exists."""
-    if 'watchlist' not in st.session_state:
-        st.session_state.watchlist = {}  # {market_id: {title, source, added_at}}
+    """Initialize watchlist from database using session ID."""
+    if 'watchlist_initialized' not in st.session_state:
+        uid = get_session_id()
+        # Trigger timezone fetch early
+        get_user_timezone() 
+        
+        # Load from DB
+        items = WatchlistQueries.get_all(uid)
+        st.session_state.watchlist = {
+            str(item['market_id']): item for item in items
+        }
+        st.session_state.watchlist_initialized = True
 
 
 def toggle_watchlist(market_id: str, title: str, source: str) -> bool:
-    """Toggle a market in/out of the watchlist. Returns True if now in watchlist."""
+    """Toggle a market in/out of the watchlist backed by DB."""
     init_watchlist()
+    uid = get_session_id()
+    
     if market_id in st.session_state.watchlist:
-        del st.session_state.watchlist[market_id]
+        # Remove
+        WatchlistQueries.remove(uid, market_id)
+        if market_id in st.session_state.watchlist:
+            del st.session_state.watchlist[market_id]
         return False
     else:
+        # Add
+        WatchlistQueries.add(uid, market_id)
         st.session_state.watchlist[market_id] = {
             'title': title,
             'source': source,
@@ -26,8 +122,11 @@ def toggle_watchlist(market_id: str, title: str, source: str) -> bool:
 
 def is_in_watchlist(market_id: str) -> bool:
     """Check if a market is in the watchlist."""
-    init_watchlist()
-    return market_id in st.session_state.watchlist
+    try:
+        init_watchlist()
+        return market_id in st.session_state.watchlist
+    except Exception:
+        return False
 
 
 def get_watchlist() -> dict:
