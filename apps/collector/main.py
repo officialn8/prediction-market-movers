@@ -39,10 +39,17 @@ def run_migrations() -> None:
                 db.execute(f.read())
             logger.info(f"Applied migration: {mig}")
         except Exception as e:
-            # Log but don't crash immediately? Or crash?
-            # If a migration fails, it's usually bad.
-            logger.error(f"Migration failed {mig}: {e}")
-            raise
+            # Check for "already exists" type errors (DuplicateObject, etc.)
+            # This is a basic catch-all for idempotency on dirty DBs
+            err = str(e).lower()
+            if "already exists" in err or "violates unique constraint" in err:
+                logger.warning(f"Migration {mig} skipped (likely already applied): {e}")
+            else:
+                logger.error(f"Migration failed {mig}: {e}")
+                # We stop on critical errors, but maybe we should let it try the constraint fix?
+                # If 001 fails, we usually want to stop. But if it fails because it exists, we continue.
+                # If 008 (the fix) runs, it needs to succeed.
+                raise
 
 
 
