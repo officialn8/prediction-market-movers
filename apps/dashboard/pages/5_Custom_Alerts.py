@@ -225,7 +225,7 @@ def create_alert_form():
     st.info(preview)
 
     # Submit
-    if st.button("Create Alert", type="primary", use_container_width=True):
+    if st.button("Create Alert", type="primary", width="stretch"):
         try:
             result = UserAlertsQueries.create_user_alert(
                 session_id=get_session_id(),
@@ -313,7 +313,7 @@ def render_alert_card(alert: dict):
     """, unsafe_allow_html=True)
 
     # Delete button
-    if st.button("🗑️ Delete", key=f"delete_{alert['alert_id']}", use_container_width=True):
+    if st.button("🗑️ Delete", key=f"delete_{alert['alert_id']}", width="stretch"):
         UserAlertsQueries.delete_user_alert(alert['alert_id'], get_session_id())
         st.rerun()
 
@@ -377,7 +377,7 @@ def render_notification(notif: dict):
     """, unsafe_allow_html=True)
 
     if not acknowledged:
-        if st.button("✓ Acknowledge", key=f"ack_{notif['notification_id']}", use_container_width=True):
+        if st.button("✓ Acknowledge", key=f"ack_{notif['notification_id']}", width="stretch"):
             UserAlertsQueries.acknowledge_notification(notif['notification_id'])
             st.rerun()
 
