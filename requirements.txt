@@ -24,3 +24,6 @@ pytest-asyncio>=0.21.0
 # black>=23.0.0
 # ruff>=0.1.0
 
+
+# Frontend Utils
+streamlit-javascript>=0.1.5

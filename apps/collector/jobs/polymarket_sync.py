@@ -142,10 +142,12 @@ def sync_markets_and_prices(adapter: PolymarketAdapter, max_markets: int = MAX_M
             logger.warning(f"Failed to sync market {pm_market.condition_id}: {e}")
             continue
     
-    # Batch insert all snapshots
+    # Batch insert all snapshots (deduplicated)
     snapshots_inserted = 0
     if snapshots:
-        snapshots_inserted = MarketQueries.insert_snapshots_batch(snapshots)
+        # Deduplicate by token_id to prevent "duplicate key" errors in same batch
+        unique_snapshots = {s["token_id"]: s for s in snapshots}.values()
+        snapshots_inserted = MarketQueries.insert_snapshots_batch(list(unique_snapshots))
     
     elapsed = time.time() - start_time
     state.last_market_sync = time.time()

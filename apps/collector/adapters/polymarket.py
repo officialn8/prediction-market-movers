@@ -72,7 +72,7 @@ class PolymarketAdapter:
         self.timeout = timeout
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "PredictionMarketMovers/1.0",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "application/json",
         })
         self._last_request_time = 0.0
@@ -174,7 +174,7 @@ class PolymarketAdapter:
         active: bool = True,
     ) -> list[PolymarketMarket]:
         """
-        Fetch all markets with pagination.
+        Fetch all markets with pagination, utilizing the events endpoint for better metadata.
         
         Args:
             max_markets: Maximum total markets to fetch
@@ -183,30 +183,8 @@ class PolymarketAdapter:
         Returns:
             List of all fetched markets
         """
-        all_markets = []
-        offset = 0
-        page_size = 100
-        
-        while len(all_markets) < max_markets:
-            markets = self.fetch_markets(
-                limit=page_size,
-                offset=offset,
-                active=active,
-                closed=False,
-            )
-            
-            if not markets:
-                break
-            
-            all_markets.extend(markets)
-            offset += page_size
-            
-            # Stop if we got fewer than requested (end of data)
-            if len(markets) < page_size:
-                break
-        
-        logger.info(f"Fetched total of {len(all_markets)} markets")
-        return all_markets[:max_markets]
+        return self.fetch_markets_via_events(limit=max_markets, active=active)
+
     
     def _parse_market(self, data: dict) -> Optional[PolymarketMarket]:
         """Parse raw API response into a PolymarketMarket object."""
@@ -220,6 +198,11 @@ class PolymarketAdapter:
         clob_token_ids = data.get("clobTokenIds") or data.get("clob_token_ids") or []
         outcomes = data.get("outcomes") or []
         outcome_prices = data.get("outcomePrices") or data.get("outcome_prices") or []
+
+        # DEBUG: Log raw data for one item to check fields
+        if not data.get("category") and not data.get("tags"):
+             logger.info(f"DEBUG DATA: {data}")
+
         
         # Handle different response formats
         if isinstance(outcomes, str):
@@ -272,6 +255,36 @@ class PolymarketAdapter:
         tags = data.get("tags") or []
         if tags and isinstance(tags, list) and len(tags) > 0:
             category = tags[0].get("label") if isinstance(tags[0], dict) else str(tags[0])
+        
+        # Fallback to direct category field if tags didn't work
+        if not category:
+            category = data.get("category")
+
+        # Fallback to events category
+        if not category:
+            events = data.get("events")
+            if events and isinstance(events, list) and len(events) > 0:
+                category = events[0].get("category")
+                
+        # Final Fallback: Heuristic based on title keywords
+        if not category:
+            title_lower = question.lower()
+            if any(k in title_lower for k in ["trump", "biden", "election", "president", "senate", "house", "cabinet", "democrat", "republican", "gop"]):
+                category = "Politics"
+            elif any(k in title_lower for k in ["bitcoin", "ethereum", "crypto", "btc", "eth", "sol", "token", "nft", "coin"]):
+                category = "Crypto"
+            elif any(k in title_lower for k in ["nba", "nfl", "super bowl", "champion", "f1", "formula 1", "messi", "ronaldo", "league"]):
+                category = "Sports"
+            elif any(k in title_lower for k in ["fed ", "federal reserve", "yield", "rates", "inflation", "s&p", "stock", "ipo", "recession"]):
+                category = "Finance"
+            elif any(k in title_lower for k in ["movie", "grossing", "taylor swift", "kanye", "grammy", "oscar"]):
+                category = "Culture"
+            elif any(k in title_lower for k in ["ukraine", "russia", "israel", "gaza", "china", "invasion", "war ", "peace"]):
+                category = "Geopolitics"
+
+        # DEBUG: Log raw data for one item to check fields
+        # if not data.get("category") and not data.get("tags"):
+        #      logger.info(f"DEBUG DATA: {data}")
         
         # Volume and liquidity
         volume_24h = None
@@ -427,6 +440,68 @@ class PolymarketAdapter:
             "spread": spread,
         }
     
+    
+    def fetch_markets_via_events(self, limit: int = 100, active: bool = True) -> List[PolymarketMarket]:
+        """
+        Fetch markets by iterating through events, which is the recommended way
+        to get all active markets and ensures better category/metadata coverage.
+        """
+        markets = []
+        offset = 0
+        page_size = 50  # Default page size for events
+        
+        while True:
+            params = {
+                "limit": page_size,
+                "offset": offset,
+                "closed": str(not active).lower(),
+                "order": "id",
+                "ascending": "false" # Newest first
+            }
+            
+            try:
+                # Use /events endpoint
+                url = f"{GAMMA_API_BASE}/events"
+                data = self._get(url, params)
+                
+                if not data:
+                    break
+                    
+                # Process events
+                for event in data:
+                    event_category = event.get("category")
+                    
+                    # Each event has a 'markets' list
+                    event_markets = event.get("markets", [])
+                    for m_data in event_markets:
+                        # Enrich market data with event metadata if needed
+                        if not m_data.get("category") and event_category:
+                            m_data["category"] = event_category
+                        
+                        # Add event tags to market tags if missing
+                        if "tags" not in m_data and "tags" in event:
+                             m_data["tags"] = event["tags"]
+                             
+                        # Parse
+                        pm_market = self._parse_market(m_data)
+                        if pm_market:
+                            markets.append(pm_market)
+                
+                # Check if we reached the limit requested
+                if len(markets) >= limit:
+                    break
+                
+                if len(data) < page_size:
+                    break
+                    
+                offset += page_size
+                
+            except Exception as e:
+                logger.error(f"Error fetching events page at offset {offset}: {e}")
+                break
+                
+        return markets[:limit]
+
     def close(self) -> None:
         """Close the HTTP session."""
         self.session.close()
