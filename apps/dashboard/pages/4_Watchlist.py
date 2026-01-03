@@ -105,11 +105,18 @@ def main():
 
     # Display each watched market with current prices
     col_left, col_right = st.columns(2)
+    
+    # Batch fetch all markets to avoid N+1 queries
+    market_ids = list(watchlist.keys())
+    markets_data = MarketQueries.get_markets_batch_with_prices(market_ids)
+    
+    # Convert list to dict for lookup
+    markets_map = {str(m['market_id']): m for m in markets_data}
 
     for i, (market_id, info) in enumerate(watchlist.items()):
         with col_left if i % 2 == 0 else col_right:
-            # Fetch current market data
-            market = MarketQueries.get_market_with_tokens_and_latest_prices(market_id)
+            # Fetch current market data from batch
+            market = markets_map.get(market_id)
 
             if not market:
                 # Market might have been deleted or closed

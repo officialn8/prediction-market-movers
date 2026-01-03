@@ -254,10 +254,10 @@ def main():
 
         # Fallback to raw SQL if cache miss or non-standard window
         if not movers:
-            # Convert to hours for the query (minimum 1 hour)
-            hours = max(1, timeframe_minutes // 60)
-            movers = MarketQueries.get_top_movers(
-                hours=hours,
+            # Fallback to raw SQL if cache miss or non-standard window
+            # We now use the exact window seconds for the query
+            movers = MarketQueries.get_movers_window(
+                window_seconds=window_seconds,
                 limit=limit,
                 source=source,
                 direction=direction,
