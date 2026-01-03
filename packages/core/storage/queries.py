@@ -217,6 +217,7 @@ class MarketQueries:
         query = """
             INSERT INTO snapshots (token_id, price, volume_24h, spread)
             VALUES (%s, %s, %s, %s)
+            ON CONFLICT DO NOTHING
         """
         params_seq = [
             (
