@@ -267,7 +267,7 @@ def render_mover_card(mover: dict, show_watchlist: bool = True) -> None:
     # Render watchlist button below the card (Streamlit button)
     if show_watchlist and market_id:
         btn_label = f"{star_icon} {'Remove from' if in_watchlist else 'Add to'} Watchlist"
-        if st.button(btn_label, key=f"watch_{market_id}_{outcome}", use_container_width=True):
+        if st.button(btn_label, key=f"watch_{market_id}_{outcome}", width="stretch"):
             toggle_watchlist(market_id, title, source)
             st.rerun()
 

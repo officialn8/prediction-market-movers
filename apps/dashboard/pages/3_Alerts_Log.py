@@ -38,6 +38,6 @@ else:
         column_config={
             "Time": st.column_config.DatetimeColumn(format="D MMM, HH:mm:ss"),
         },
-        use_container_width=True,
+        width="stretch",
         hide_index=True
     )

@@ -167,10 +167,10 @@ def main():
             # Action buttons
             btn_col1, btn_col2 = st.columns(2)
             with btn_col1:
-                if st.button("📊 View Details", key=f"view_{market_id}", use_container_width=True):
+                if st.button("📊 View Details", key=f"view_{market_id}", width="stretch"):
                     st.switch_page("pages/2_Market_Detail.py")
             with btn_col2:
-                if st.button("✕ Remove", key=f"remove_{market_id}", use_container_width=True):
+                if st.button("✕ Remove", key=f"remove_{market_id}", width="stretch"):
                     toggle_watchlist(market_id, "", "")
                     st.rerun()
 

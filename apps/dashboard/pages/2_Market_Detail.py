@@ -287,7 +287,7 @@ def main():
                 if data:
                     fig = create_price_chart(data, token.get("outcome", "YES"), use_ohlc=use_ohlc)
                     if fig:
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, width="stretch")
                 else:
                     st.info(f"No price history available for {token.get('outcome')} token in this timeframe.")
     else:

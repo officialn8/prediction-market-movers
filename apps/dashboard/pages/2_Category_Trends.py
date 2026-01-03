@@ -64,7 +64,7 @@ def main():
         tooltip=['category', alt.Tooltip('avg_abs_move', format='.2f'), 'market_count']
     ).properties(height=400)
     
-    st.altair_chart(chart_volatility, use_container_width=True)
+    st.altair_chart(chart_volatility, width="stretch")
     
     # 2. Volume Distribution
     st.subheader("💰 Volume Distribution")
@@ -75,7 +75,7 @@ def main():
         tooltip=['category', 'total_volume', 'market_count']
     ).properties(height=400)
     
-    st.altair_chart(chart_volume, use_container_width=True)
+    st.altair_chart(chart_volume, width="stretch")
 
     # 3. Drill Down
     st.divider()
