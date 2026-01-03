@@ -6,7 +6,7 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 
-from apps.dashboard.components import get_watchlist, toggle_watchlist, init_watchlist
+from apps.dashboard.components import get_watchlist, toggle_watchlist, init_watchlist, to_user_tz
 from packages.core.storage.queries import MarketQueries
 
 st.set_page_config(
@@ -148,7 +148,7 @@ def main():
                     <div>
                         <span class="source-tag">{market.get('source', 'unknown')}</span>
                         <span style="color: #71717a; font-size: 0.75rem; margin-left: 0.5rem;">
-                            Added {info.get('added_at', '')[:10]}
+                            Added {to_user_tz(datetime.fromisoformat(info.get('added_at', ''))).strftime('%Y-%m-%d %H:%M') if info.get('added_at') else ''}
                         </span>
                     </div>
                     <span style="color: #fbbf24; font-size: 1.25rem;">★</span>
