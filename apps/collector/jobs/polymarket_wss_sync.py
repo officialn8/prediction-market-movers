@@ -43,69 +43,81 @@ async def run_wss_loop(shutdown: Shutdown) -> None:
     
     # Get all asset IDs to subscribe to
     db_pool = get_db_pool()
-    
-    # Simple query to get all token_ids from markets
-    # We join with market_tokens because token_id is 1:many with markets
-    # We also need the latest price for the initial map
+
+    # Query for Polymarket source_token_ids (what WSS expects) AND map to DB token_ids
+    # The WSS uses Polymarket's token IDs, not our internal UUIDs
     query = """
-        SELECT mt.token_id, 
+        SELECT mt.token_id as db_token_id,
+               mt.source_token_id,
                (SELECT price FROM snapshots s WHERE s.token_id = mt.token_id ORDER BY ts DESC LIMIT 1) as price
         FROM markets m
         JOIN market_tokens mt ON m.market_id = mt.market_id
         WHERE m.status = 'active'
+          AND mt.source_token_id IS NOT NULL
+          AND m.source = 'polymarket'
     """
     rows = db_pool.execute(query, fetch=True) or []
-    
-    token_map = {str(r["token_id"]): float(r["price"] or 0) for r in rows}
 
-    asset_ids = list(token_map.keys())
+    # Map: source_token_id (Polymarket) -> db_token_id (UUID) for DB writes
+    source_to_db_token = {}
+    # Map: source_token_id -> last known price (for mover detection)
+    price_map = {}
+
+    for r in rows:
+        source_id = r["source_token_id"]
+        db_id = str(r["db_token_id"])
+        source_to_db_token[source_id] = db_id
+        price_map[source_id] = float(r["price"] or 0)
+
+    # Subscribe using Polymarket source_token_ids (NOT UUIDs!)
+    asset_ids = list(source_to_db_token.keys())
     logger.info(f"Loaded {len(asset_ids)} assets for WSS subscription")
 
     client = PolymarketWebSocket()
     pending_updates: list[PriceUpdate] = []
     last_batch_flush = time.time()
-    
+
     consecutive_failures = 0
-    
+
     while not shutdown.is_set:
         try:
             await client.connect(asset_ids)
             consecutive_failures = 0
-            
+
             async for update in client.listen():
                 if shutdown.is_set:
                     break
-                    
+
+                # update.token_id is the Polymarket source_token_id (from WSS)
+                source_token_id = update.token_id
+
                 # 1. Update local cache for mover detection
-                if update.token_id in token_map:
-                    old_price = token_map[update.token_id]
-                    # Check for instant mover
-                    mover = await check_instant_mover(update.token_id, old_price, update.price)
-                    if mover:
-                        logger.info(f"Instant Mover Detected: {update.token_id} {old_price} -> {update.price}")
-                        # Fire and forget alert
-                        asyncio.create_task(broadcast_mover_alert(mover))
-                
-                # Update local map
-                token_map[update.token_id] = update.price
-                
-                # 2. Add to batch
+                if source_token_id in price_map:
+                    old_price = price_map[source_token_id]
+                    # Check for instant mover (use db_token_id for DB operations)
+                    db_token_id = source_to_db_token.get(source_token_id)
+                    if db_token_id:
+                        mover = await check_instant_mover(db_token_id, old_price, update.price)
+                        if mover:
+                            logger.info(f"Instant Mover Detected: {source_token_id} {old_price:.4f} -> {update.price:.4f}")
+                            asyncio.create_task(broadcast_mover_alert(mover))
+
+                # Update local price map
+                price_map[source_token_id] = update.price
+
+                # 2. Add to batch (include db_token_id for flush)
                 pending_updates.append(update)
-                
+
                 # 3. Check flush conditions
                 now = time.time()
-                
-                # Update metrics file every second approx (on message) or just periodically
-                # Doing it on every message is too much I/O.
-                # Let's do it on batch flush or roughly every second.
-                
-                if (len(pending_updates) >= settings.wss_batch_size or 
+
+                if (len(pending_updates) >= settings.wss_batch_size or
                     (now - last_batch_flush) >= settings.wss_batch_interval):
-                    
-                    await flush_price_batch(pending_updates)
+
+                    await flush_price_batch(pending_updates, source_to_db_token)
                     pending_updates.clear()
                     last_batch_flush = now
-                    
+
                     # Update metrics
                     client._metrics.save()
                     
@@ -117,11 +129,15 @@ async def run_wss_loop(shutdown: Shutdown) -> None:
                 if settings.wss_fallback_to_polling:
                     logger.critical("Max WSS reconnects reached. Falling back to POLLING mode.")
                     await client.close()
-                    # Fallback loop - basically run the standard polling logic
-                    # We can't easily return to main.py to switch modes without restarting.
-                    # So we run the polling logic here indefinitely or until restart.
-                    from apps.collector.jobs.polymarket_sync import run_polymarket
-                    await run_polymarket(shutdown, every_seconds=settings.sync_interval_seconds)
+                    # Fallback: run polling loop using sync_once
+                    from apps.collector.jobs.polymarket_sync import sync_once
+                    logger.info(f"Starting fallback polling (interval={settings.sync_interval_seconds}s)")
+                    while not shutdown.is_set:
+                        try:
+                            await sync_once()
+                        except Exception as poll_err:
+                            logger.exception(f"Fallback polling error: {poll_err}")
+                        await asyncio.sleep(settings.sync_interval_seconds)
                     return
                 else:
                     logger.critical("Max WSS reconnects reached and fallback disabled. Exiting.")
@@ -132,68 +148,67 @@ async def run_wss_loop(shutdown: Shutdown) -> None:
         finally:
              await client.close()
 
-async def flush_price_batch(updates: list[PriceUpdate]) -> None:
-    """Batch insert pending updates to database."""
+async def flush_price_batch(updates: list[PriceUpdate], source_to_db_token: dict[str, str]) -> None:
+    """
+    Batch insert pending updates to database.
+
+    Args:
+        updates: List of PriceUpdate objects (token_id is Polymarket source_token_id)
+        source_to_db_token: Mapping of source_token_id -> db_token_id (UUID string)
+    """
     if not updates:
         return
-        
-    # We only want to snapshot the LATEST price for each token in this batch
-    # to avoid writing intermediate ticks to DB.
+
+    # Deduplicate: keep only the LATEST price for each token in this batch
     latest_map = {}
     for u in updates:
         latest_map[u.token_id] = u
-        
+
     unique_updates = list(latest_map.values())
-    
-    unique_updates = list(latest_map.values())
-    
-    db_pool = get_db_pool()
-    
-    # Bulk insert into snapshots
-    # We need market_id for the snapshot.
-    token_ids = [u.token_id for u in unique_updates]
-    # SQL IN clause
-    
-    if not token_ids:
+
+    if not unique_updates:
         return
 
-    # Updated query to use market_tokens table for mapping
+    db_pool = get_db_pool()
+
+    # Convert source_token_ids to db_token_ids for DB operations
+    db_token_ids = []
+    for u in unique_updates:
+        db_id = source_to_db_token.get(u.token_id)
+        if db_id:
+            db_token_ids.append(db_id)
+
+    if not db_token_ids:
+        return
+
+    # Get token_id -> market_id mapping from database
     q = """
-        SELECT mt.market_id as id, mt.token_id 
+        SELECT mt.market_id as id, mt.token_id
         FROM market_tokens mt
         WHERE mt.token_id = ANY(%s::uuid[])
     """
-    rows = db_pool.execute(q, (token_ids,), fetch=True) or []
-    token_to_market_id = {str(r["token_id"]): r["id"] for r in rows}
-    
+    rows = db_pool.execute(q, (db_token_ids,), fetch=True) or []
+    db_token_to_market_id = {str(r["token_id"]): r["id"] for r in rows}
+
     values = []
     for u in unique_updates:
-        mid = token_to_market_id.get(u.token_id)
-        if mid:
-            values.append((
-                mid,
-                u.price,
-                0, # volume
-                u.timestamp
-            ))
-    
+        db_token_id = source_to_db_token.get(u.token_id)
+        if db_token_id:
+            market_id = db_token_to_market_id.get(db_token_id)
+            if market_id:
+                values.append((
+                    db_token_id,  # token_id (UUID)
+                    u.price,
+                    None,  # volume_24h
+                    None,  # spread
+                ))
+
     if values:
-        # logic from existing sync: insert into snapshots
-        # "INSERT INTO snapshots (market_id, price, volume, ts) VALUES (:market_id, :price, :volume, :ts)"
-        db_pool.execute_many(
-            "INSERT INTO snapshots (market_id, price, volume, ts) VALUES (%s, %s, %s, %s)",
-            values
-        )
-        # Update markets updated_at timestamp
-        # We can do this in one go or separate.
-        # "UPDATE markets SET updated_at = :ts WHERE market_id = :market_id"
-        update_values = [
-            (v[3], v[0]) # ts, market_id
+        # Use existing MarketQueries for consistent snapshot insertion
+        from packages.core.storage.queries import MarketQueries
+        snapshots = [
+            {"token_id": v[0], "price": v[1], "volume_24h": v[2], "spread": v[3]}
             for v in values
         ]
-        db_pool.execute_many(
-            "UPDATE markets SET updated_at = %s WHERE market_id = %s",
-            update_values
-        )
-        
-        logger.debug(f"Flushed {len(values)} price updates to DB")
+        inserted = MarketQueries.insert_snapshots_batch(snapshots)
+        logger.debug(f"Flushed {inserted} price updates to DB")
