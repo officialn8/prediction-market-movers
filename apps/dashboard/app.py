@@ -588,12 +588,12 @@ def render_mover_card(mover: dict):
     # Generate reason
     direction = "spiked" if pct_change > 0 else "dropped"
     vol_str = format_volume(volume)
-    reason = f"{outcome} {direction} {abs(pct_change):.1f}% on {vol_str} volume"
+    reason = f"{outcome} {direction} {abs(pct_change):.1f}pp on {vol_str} volume"
     
     # Category tag
     category_html = f'<span class="tag tag-category">{category}</span>' if category else ''
     
-    html_content = f"""<div class="mover-card"><div class="mover-header"><div style="flex: 1;"><div class="mover-tags"><span class="tag tag-source">{source}</span><span class="tag tag-{outcome_class}">{outcome}</span>{category_html}</div><p class="mover-title">{title}</p><p class="mover-price">${old_price:.2f} → ${latest_price:.2f}</p></div><div class="mover-change {change_class}">{change_sign}{pct_change:.1f}%</div></div><div class="mover-reason">📊 {reason}</div></div>"""
+    html_content = f"""<div class="mover-card"><div class="mover-header"><div style="flex: 1;"><div class="mover-tags"><span class="tag tag-source">{source}</span><span class="tag tag-{outcome_class}">{outcome}</span>{category_html}</div><p class="mover-title">{title}</p><p class="mover-price">${old_price:.2f} → ${latest_price:.2f}</p></div><div class="mover-change {change_class}">{change_sign}{pct_change:.1f}pp</div></div><div class="mover-reason">📊 {reason}</div></div>"""
     
     st.markdown(html_content, unsafe_allow_html=True)
 

@@ -139,9 +139,9 @@ class PriceMover(BaseModel):
     
     @property
     def formatted_change(self) -> str:
-        """Return formatted percentage change string."""
+        """Return formatted percentage points change string."""
         sign = "+" if self.pct_change > 0 else ""
-        return f"{sign}{self.pct_change:.2f}%"
+        return f"{sign}{self.pct_change:.2f}pp"
 
 
 # =============================================================================

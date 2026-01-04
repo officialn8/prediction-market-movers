@@ -125,8 +125,9 @@ def trigger_alert(alert: dict) -> None:
         window_seconds = alert.get('window_seconds', 3600)
         old_price = get_historical_price(alert['token_id'], window_seconds)
         if old_price:
-            pct_change = (current_price - old_price) / old_price * 100
-            message = f"{outcome} price changed {pct_change:+.1f}% (${old_price:.2f} -> ${current_price:.2f})"
+            # Use percentage points (pp) for prediction markets
+            change_pp = (current_price - old_price) * 100
+            message = f"{outcome} price changed {change_pp:+.1f}pp (${old_price:.2f} -> ${current_price:.2f})"
         else:
             message = f"{outcome} price changed significantly"
 

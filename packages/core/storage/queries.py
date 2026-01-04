@@ -342,11 +342,9 @@ class MarketQueries:
                     l.latest_price,
                     COALESCE(lv.latest_volume, 0) as latest_volume,
                     h.old_price,
-                    CASE
-                        WHEN h.old_price > 0 THEN
-                            ROUND(((l.latest_price - h.old_price) / h.old_price * 100)::numeric, 2)
-                        ELSE NULL
-                    END as pct_change
+                    -- Use percentage points (pp) instead of percentage change
+                    -- PP is more meaningful for prediction markets (bounded -100 to +100)
+                    ROUND(((l.latest_price - h.old_price) * 100)::numeric, 2) as pct_change
                 FROM latest l
                 JOIN historical h ON l.token_id = h.token_id
                 LEFT JOIN latest_volume lv ON l.token_id = lv.token_id
@@ -363,7 +361,6 @@ class MarketQueries:
             JOIN market_tokens mt ON c.token_id = mt.token_id
             JOIN markets m ON mt.market_id = m.market_id
             WHERE m.status = 'active'
-              AND c.pct_change IS NOT NULL
               {source_filter}
               {category_filter}
               {direction_filter}
@@ -443,11 +440,9 @@ class MarketQueries:
                     l.latest_price,
                     COALESCE(lv.latest_volume, 0) as latest_volume,
                     h.old_price,
-                    CASE
-                        WHEN h.old_price > 0 THEN
-                            ROUND(((l.latest_price - h.old_price) / h.old_price * 100)::numeric, 2)
-                        ELSE NULL
-                    END as pct_change
+                    -- Use percentage points (pp) instead of percentage change
+                    -- PP is more meaningful for prediction markets (bounded -100 to +100)
+                    ROUND(((l.latest_price - h.old_price) * 100)::numeric, 2) as pct_change
                 FROM latest l
                 JOIN historical h ON l.token_id = h.token_id
                 LEFT JOIN latest_volume lv ON l.token_id = lv.token_id
@@ -464,7 +459,6 @@ class MarketQueries:
             JOIN market_tokens mt ON c.token_id = mt.token_id
             JOIN markets m ON mt.market_id = m.market_id
             WHERE m.status = 'active'
-              AND c.pct_change IS NOT NULL
               {source_filter}
               {category_filter}
               {direction_filter}
@@ -1405,11 +1399,9 @@ class VolumeQueries:
                     l.current_volume,
                     h.old_price,
                     va.avg_volume,
-                    CASE
-                        WHEN h.old_price > 0 THEN
-                            ROUND(((l.latest_price - h.old_price) / h.old_price * 100)::numeric, 2)
-                        ELSE NULL
-                    END as pct_change,
+                    -- Use percentage points (pp) instead of percentage change
+                    -- PP is more meaningful for prediction markets (bounded -100 to +100)
+                    ROUND(((l.latest_price - h.old_price) * 100)::numeric, 2) as pct_change,
                     CASE
                         WHEN va.avg_volume > 0 AND l.current_volume IS NOT NULL THEN
                             ROUND((l.current_volume / va.avg_volume)::numeric, 2)
@@ -1431,7 +1423,6 @@ class VolumeQueries:
             JOIN market_tokens mt ON c.token_id = mt.token_id
             JOIN markets m ON mt.market_id = m.market_id
             WHERE m.status = 'active'
-              AND c.pct_change IS NOT NULL
               {source_filter}
               {expiry_filter}
             ORDER BY
