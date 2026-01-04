@@ -42,9 +42,29 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
+from packages.core.wss import WSSMetrics
+
+def render_wss_status():
+    """Show WSS connection status and metrics in sidebar."""
+    metrics = WSSMetrics.load()
+    
+    st.sidebar.markdown("### 🔌 Real-Time Status")
+    
+    color = "green" if metrics.mode == "wss" else "orange" if metrics.mode == "polling" else "red"
+    st.sidebar.markdown(f"**Mode:** <span style='color:{color}'>{metrics.mode.upper()}</span>", unsafe_allow_html=True)
+    
+    if metrics.mode == "wss":
+        c1, c2 = st.sidebar.columns(2)
+        c1.metric("Msg/s", f"{metrics.messages_per_second:.1f}")
+        c2.metric("Subs", f"{metrics.current_subscriptions}")
+        
+        age = metrics.last_message_age_seconds
+        st.sidebar.caption(f"Last update: {age:.1f}s ago")
+
 def main():
     # Initialize watchlist
     init_watchlist()
+    render_wss_status()
 
     # Search Bar (Top)
     search_query = st.text_input("🔍 Search Markets", placeholder="trump, bitcoin, fed...", label_visibility="collapsed")
