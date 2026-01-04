@@ -25,7 +25,7 @@ else:
             "Time": a["created_at"],
             "Market": a["market_title"],
             "Outcome": a["outcome"],
-            "Move": f"{float(a['move_pp']):.2f}%",
+            "Move": f"{float(a['move_pp']):.2f}pp",
             "Reason": a["reason"],
             "Symbol": a["symbol"]
         })

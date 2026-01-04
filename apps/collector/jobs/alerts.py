@@ -136,7 +136,7 @@ async def run_alerts_check() -> None:
 
                 # Build alert message
                 sign = "+" if move_pp > 0 else ""
-                alert_parts = [f"{title} ({outcome}): {sign}{move_pp:.2f}%"]
+                alert_parts = [f"{title} ({outcome}): {sign}{move_pp:.2f}pp"]
 
                 if spike_ratio and spike_ratio >= COMBINED_SPIKE_THRESHOLD:
                     alert_parts.append(f"📊 {spike_ratio:.1f}x volume")

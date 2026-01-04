@@ -177,16 +177,16 @@ def _hex_to_rgb(hex_color: str) -> str:
 def generate_reason(pct_change: float, volume: float, outcome: str, spike_ratio: Optional[float] = None, use_html: bool = True) -> str:
     """Generate a readable reason for the move."""
     direction = "spiked" if pct_change > 0 else "dropped"
-    abs_pct = abs(pct_change)
+    abs_pp = abs(pct_change)
 
     vol_str = format_volume(volume)
 
     if use_html:
-        reason = f"<strong>{outcome}</strong> {direction} <strong>{abs_pct:.1f}%</strong> on {vol_str} vol"
+        reason = f"<strong>{outcome}</strong> {direction} <strong>{abs_pp:.1f}pp</strong> on {vol_str} vol"
         if spike_ratio and spike_ratio >= 2.0:
             reason += f" (<strong>{spike_ratio:.1f}x</strong> normal)"
     else:
-        reason = f"**{outcome}** {direction} **{abs_pct:.1f}%** on {vol_str} vol"
+        reason = f"**{outcome}** {direction} **{abs_pp:.1f}pp** on {vol_str} vol"
         if spike_ratio and spike_ratio >= 2.0:
             reason += f" (**{spike_ratio:.1f}x** normal)"
 
@@ -264,7 +264,7 @@ def render_mover_card(mover: dict, show_watchlist: bool = True) -> None:
       <div style="margin-top: 0.5rem; font-size: 0.85rem; color: {secondary_color};">📊 {reason}</div>
     </div>
     <div style="text-align: right;">
-      <p style="font-family: monospace; font-size: 1.5rem; font-weight: 600; color: {change_color}; margin: 0;">{change_sign}{pct_change:.1f}%</p>
+      <p style="font-family: monospace; font-size: 1.5rem; font-weight: 600; color: {change_color}; margin: 0;">{change_sign}{pct_change:.1f}pp</p>
       <p style="font-size: 0.75rem; color: {muted_color}; margin: 0.25rem 0 0 0;">{category}</p>
     </div>
   </div>
