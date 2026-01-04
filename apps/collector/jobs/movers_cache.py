@@ -12,6 +12,8 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 from decimal import Decimal
+from typing import Optional
+from dataclasses import dataclass
 
 from packages.core.storage.queries import MarketQueries, AnalyticsQueries, VolumeQueries
 from packages.core.storage.db import get_db_pool
@@ -44,9 +46,10 @@ async def update_movers_cache() -> None:
     now = datetime.now(timezone.utc)
 
     # Pre-fetch volume averages for spike detection
+    # Pre-fetch volume averages for spike detection
     volume_avg_map = {}
     try:
-        volume_avgs = VolumeQueries.get_volume_averages()
+        volume_avgs = await asyncio.to_thread(VolumeQueries.get_volume_averages)
         for va in volume_avgs:
             token_id = str(va.get("token_id"))
             avg_vol = va.get("avg_volume_7d")
@@ -58,7 +61,8 @@ async def update_movers_cache() -> None:
     for window in WINDOWS:
         try:
             # Fetch raw movers from the centralized query
-            raw_movers = MarketQueries.get_movers_window(
+            raw_movers = await asyncio.to_thread(
+                MarketQueries.get_movers_window,
                 window_seconds=window,
                 limit=1000,
                 direction="both"
@@ -127,7 +131,7 @@ async def update_movers_cache() -> None:
             cache_buffer = cache_buffer[:100]
 
             if cache_buffer:
-                AnalyticsQueries.insert_movers_batch(cache_buffer)
+                await asyncio.to_thread(AnalyticsQueries.insert_movers_batch, cache_buffer)
                 logger.info(
                     f"Updated cache for {window}s window: {len(cache_buffer)} records "
                     f"(top score: {cache_buffer[0]['quality_score']:.2f})"
@@ -149,15 +153,60 @@ async def get_enhanced_movers(
     real-time volume spike information.
     """
     try:
-        return VolumeQueries.get_movers_with_volume_context(
+        return await asyncio.to_thread(
+            VolumeQueries.get_movers_with_volume_context,
             window_seconds=window_seconds,
             limit=limit,
             source=source,
         )
     except Exception as e:
         logger.warning(f"Enhanced movers query failed, falling back to cached: {e}")
-        return AnalyticsQueries.get_cached_movers(
+        return await asyncio.to_thread(
+            AnalyticsQueries.get_cached_movers,
             window_seconds=window_seconds,
             limit=limit,
             source=source,
         )
+
+
+@dataclass
+class MoverAlert:
+    token_id: str
+    old_price: float
+    new_price: float
+    change_pct: float
+    detected_at: datetime
+
+async def check_instant_mover(
+    token_id: str,
+    old_price: float,
+    new_price: float,
+    threshold: float = 0.05  # 5% change
+) -> Optional[MoverAlert]:
+    """
+    Check if price change qualifies as instant mover.
+    Called directly from WSS handler for sub-second detection.
+    """
+    if old_price <= 0:
+        return None
+        
+    change_pct = (new_price - old_price) / old_price
+    
+    if abs(change_pct) >= threshold:
+        return MoverAlert(
+            token_id=token_id,
+            old_price=old_price,
+            new_price=new_price,
+            change_pct=change_pct,
+            detected_at=datetime.utcnow()
+        )
+    return None
+
+async def broadcast_mover_alert(alert: MoverAlert) -> None:
+    """
+    Broadcast instant mover alert.
+    For now just log, but could push to frontend via websocket or db alert table.
+    """
+    logger.info(f"INSTANT MOVER: {alert.token_id} moved {alert.change_pct:.2%} ({alert.old_price} -> {alert.new_price})")
+    # TODO: Implement real alerting logic (e.g. insert into alerts table)
+

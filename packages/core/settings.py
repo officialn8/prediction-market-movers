@@ -37,7 +37,34 @@ class Settings(BaseSettings):
     
     # Collector Settings
     sync_interval_seconds: int = Field(default=300, ge=60, le=3600)
+    sync_interval_seconds: int = Field(default=300, ge=60, le=3600)
     log_level: str = Field(default="INFO")
+
+    # Polymarket WebSocket Settings
+    polymarket_use_wss: bool = Field(
+        default=False,
+        description="Enable WebSocket for real-time updates"
+    )
+    wss_reconnect_delay: float = Field(
+        default=5.0,
+        description="Seconds to wait before reconnecting"
+    )
+    wss_max_reconnect_attempts: int = Field(
+        default=10,
+        description="Max reconnection attempts before fallback"
+    )
+    wss_batch_size: int = Field(
+        default=100,
+        description="Batch size for DB writes"
+    )
+    wss_batch_interval: float = Field(
+        default=1.0,
+        description="Max seconds between batch flushes"
+    )
+    wss_fallback_to_polling: bool = Field(
+        default=True,
+        description="Fall back to REST polling on WSS failure"
+    )
     
     # Streamlit Settings
     streamlit_server_port: int = Field(default=8501)

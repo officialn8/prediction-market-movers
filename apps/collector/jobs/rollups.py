@@ -41,7 +41,7 @@ async def run_ohlc_rollups() -> None:
                 close = EXCLUDED.close,
                 volume = EXCLUDED.volume;
         """
-        db.execute(query_1m)
+        await asyncio.to_thread(db.execute, query_1m)
         
         # 2. Generate 5m candles from 1m candles
         query_5m = """
@@ -64,7 +64,7 @@ async def run_ohlc_rollups() -> None:
                 close = EXCLUDED.close,
                 volume = EXCLUDED.volume;
         """
-        db.execute(query_5m)
+        await asyncio.to_thread(db.execute, query_5m)
 
         # 3. Generate 1h candles from 5m (or 1m) candles
         # Using 5m as source is slightly more efficient if populated, but 1m is fine.
@@ -90,13 +90,13 @@ async def run_ohlc_rollups() -> None:
                 close = EXCLUDED.close,
                 volume = EXCLUDED.volume;
         """
-        db.execute(query_1h)
+        await asyncio.to_thread(db.execute, query_1h)
         
         # 4. Retention Policy (Hourly check)
         # Run cleanup only at the top of the hour to save resources
         if datetime.now().minute == 0:
             logger.info("Running hourly retention cleanup...")
-            db.execute("CALL clean_old_snapshots()")
+            await asyncio.to_thread(db.execute, "CALL clean_old_snapshots()")
         
         logger.info("OHLC rollups complete.")
         
