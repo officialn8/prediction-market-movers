@@ -385,9 +385,22 @@ class MarketQueries:
         source: Optional[str] = None,
         category: Optional[str] = None,
         direction: str = "both",
+        include_quality_score: bool = False,
     ) -> list[dict]:
         """
         Get top price movers over an arbitrary time window in seconds.
+        
+        Now includes composite scoring in SQL for efficient ranking:
+        - score = abs_move * ln(1 + volume)
+        - Ranking and LIMIT applied in SQL to avoid shipping large sets
+        
+        Args:
+            window_seconds: Time window in seconds
+            limit: Max results to return (applied in SQL)
+            source: Optional source filter
+            category: Optional category filter  
+            direction: 'both', 'gainers', or 'losers'
+            include_quality_score: If True, includes quality_score column for cache updates
         """
         db = get_db_pool()
 
@@ -402,10 +415,22 @@ class MarketQueries:
             order = "pct_change ASC"
         else:
             direction_filter = ""
-            order = "ABS(pct_change) DESC"
+            # When include_quality_score, order by composite score instead of raw move
+            order = "quality_score DESC NULLS LAST" if include_quality_score else "ABS(pct_change) DESC"
         
         # Filter markets ending very soon
         expiry_filter = "AND (m.end_date IS NULL OR m.end_date > NOW() + INTERVAL '24 hours')"
+        
+        # Optional quality score calculation
+        quality_score_col = """
+            -- Composite quality score: abs_move * log1p(volume)
+            -- This matches the Python-side scoring in movers_cache.py
+            CASE 
+                WHEN latest_volume > 0 THEN 
+                    ROUND((ABS(pct_change) * LN(1 + latest_volume))::numeric, 4)
+                ELSE 0 
+            END as quality_score,
+        """ if include_quality_score else ""
 
         query = f"""
             WITH latest AS (
@@ -441,28 +466,31 @@ class MarketQueries:
                     COALESCE(lv.latest_volume, 0) as latest_volume,
                     h.old_price,
                     -- Use percentage points (pp) instead of percentage change
-                    -- PP is more meaningful for prediction markets (bounded -100 to +100)
                     ROUND(((l.latest_price - h.old_price) * 100)::numeric, 2) as pct_change
                 FROM latest l
                 JOIN historical h ON l.token_id = h.token_id
                 LEFT JOIN latest_volume lv ON l.token_id = lv.token_id
+            ),
+            ranked AS (
+                SELECT
+                    c.*,
+                    {quality_score_col}
+                    mt.market_id,
+                    mt.outcome,
+                    m.title,
+                    m.source,
+                    m.category,
+                    m.url
+                FROM changes c
+                JOIN market_tokens mt ON c.token_id = mt.token_id
+                JOIN markets m ON mt.market_id = m.market_id
+                WHERE m.status = 'active'
+                  {source_filter}
+                  {category_filter}
+                  {direction_filter}
+                  {expiry_filter}
             )
-            SELECT
-                c.*,
-                mt.market_id,
-                mt.outcome,
-                m.title,
-                m.source,
-                m.category,
-                m.url
-            FROM changes c
-            JOIN market_tokens mt ON c.token_id = mt.token_id
-            JOIN markets m ON mt.market_id = m.market_id
-            WHERE m.status = 'active'
-              {source_filter}
-              {category_filter}
-              {direction_filter}
-              {expiry_filter}
+            SELECT * FROM ranked
             ORDER BY {order}
             LIMIT %s
         """
@@ -622,9 +650,9 @@ class AnalyticsQueries:
             INSERT INTO movers_cache (
                 as_of_ts, window_seconds, token_id, 
                 price_now, price_then, move_pp, abs_move_pp, 
-                rank, quality_score
+                rank, quality_score, volume_24h, spike_ratio
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (as_of_ts, window_seconds, rank) DO NOTHING
         """
         
@@ -639,6 +667,8 @@ class AnalyticsQueries:
                 m["abs_move_pp"],
                 m["rank"],
                 m.get("quality_score"),
+                m.get("volume_24h"),
+                m.get("spike_ratio"),
             )
             for m in movers
         ]
@@ -747,6 +777,7 @@ class AnalyticsQueries:
             direction_filter = ""
             
         # Get the latest cached batch for this window
+        # Now includes volume_24h and spike_ratio from cache for consistent display
         query = f"""
             WITH latest_batch AS (
                 SELECT MAX(as_of_ts) as max_ts
@@ -754,7 +785,7 @@ class AnalyticsQueries:
                 WHERE window_seconds = %s
             ),
             latest_volume AS (
-                -- Get latest NON-NULL volume (from REST syncs, not WSS which has NULL volume)
+                -- Fallback: Get latest NON-NULL volume if not in cache
                 SELECT DISTINCT ON (token_id)
                     token_id,
                     volume_24h as latest_volume
@@ -767,7 +798,10 @@ class AnalyticsQueries:
                 mc.move_pp as pct_change, -- Alias for compat
                 mc.price_now as latest_price,
                 mc.price_then as old_price,
-                COALESCE(lv.latest_volume, 0) as latest_volume,
+                -- Use cached volume if available, else fallback to snapshot
+                COALESCE(mc.volume_24h, lv.latest_volume, 0) as latest_volume,
+                -- Expose spike_ratio directly from cache
+                mc.spike_ratio as cached_spike_ratio,
                 mt.market_id,
                 mt.outcome,
                 mt.symbol,

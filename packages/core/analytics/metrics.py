@@ -237,3 +237,150 @@ def calculate_price_velocity(
     velocity = price_diff / time_diff_minutes
 
     return Decimal(str(velocity))
+
+
+# =============================================================================
+# MOVERS SCORING - Unified scoring for ranking top movers
+# =============================================================================
+
+class MoverScorer:
+    """
+    Unified scorer for ranking market movers.
+    
+    Encapsulates the scoring logic used in both:
+    - Background cache job (movers_cache.py)
+    - Real-time WSS handler (check_instant_mover)
+    
+    This ensures consistent ranking across all code paths.
+    """
+    
+    def __init__(
+        self,
+        weight_move: float = 1.0,
+        weight_volume: float = 1.0,
+        weight_spike: float = 0.5,
+        min_quality_score: Decimal = Decimal("1.0"),
+    ):
+        """
+        Initialize scorer with configurable weights.
+        
+        Args:
+            weight_move: Weight for price movement component
+            weight_volume: Weight for volume component
+            weight_spike: Weight for spike bonus
+            min_quality_score: Minimum score to be considered significant
+        """
+        self.weight_move = weight_move
+        self.weight_volume = weight_volume
+        self.weight_spike = weight_spike
+        self.min_quality_score = min_quality_score
+    
+    def score(
+        self,
+        price_now: Decimal,
+        price_then: Decimal,
+        volume: Decimal,
+        avg_volume: Optional[Decimal] = None,
+    ) -> Tuple[Decimal, Optional[Decimal], Decimal]:
+        """
+        Calculate composite score for a mover.
+        
+        Args:
+            price_now: Current price
+            price_then: Historical price
+            volume: Current 24h volume
+            avg_volume: Historical average volume (for spike detection)
+            
+        Returns:
+            Tuple of (composite_score, spike_ratio, move_pp)
+        """
+        # Calculate base metrics
+        move_pp = calculate_move_pp(price_now, price_then)
+        abs_move_pp = abs(move_pp)
+        
+        # Calculate spike ratio if we have historical volume
+        spike_ratio = None
+        if avg_volume is not None and avg_volume > 0:
+            spike_ratio = calculate_volume_spike_ratio(volume, avg_volume)
+        
+        # Calculate composite score
+        composite_score = calculate_composite_score(
+            abs_move_pp=abs_move_pp,
+            volume=volume,
+            spike_ratio=spike_ratio,
+            weight_move=self.weight_move,
+            weight_volume=self.weight_volume,
+            weight_spike=self.weight_spike,
+        )
+        
+        return composite_score, spike_ratio, move_pp
+    
+    def is_significant(self, score: Decimal) -> bool:
+        """Check if a score meets the minimum threshold."""
+        return score >= self.min_quality_score
+    
+    def rank_movers(
+        self,
+        movers: list[dict],
+        price_now_key: str = "latest_price",
+        price_then_key: str = "old_price",
+        volume_key: str = "latest_volume",
+        avg_volume_map: Optional[dict] = None,
+    ) -> list[dict]:
+        """
+        Score and rank a list of mover candidates.
+        
+        Args:
+            movers: List of mover dicts from query
+            price_now_key: Dict key for current price
+            price_then_key: Dict key for historical price
+            volume_key: Dict key for volume
+            avg_volume_map: Optional map of token_id -> avg_volume for spike detection
+            
+        Returns:
+            Sorted list with added score, spike_ratio, move_pp, and rank fields
+        """
+        scored = []
+        
+        for mover in movers:
+            token_id = str(mover.get("token_id", ""))
+            
+            try:
+                price_now = Decimal(str(mover.get(price_now_key, 0)))
+                price_then = Decimal(str(mover.get(price_then_key, 0)))
+                volume = Decimal(str(mover.get(volume_key, 0) or 0))
+                
+                # Get average volume if available
+                avg_volume = None
+                if avg_volume_map and token_id in avg_volume_map:
+                    avg_volume = avg_volume_map[token_id]
+                
+                score, spike_ratio, move_pp = self.score(
+                    price_now, price_then, volume, avg_volume
+                )
+                
+                if not self.is_significant(score):
+                    continue
+                
+                mover["quality_score"] = score
+                mover["spike_ratio"] = spike_ratio
+                mover["move_pp"] = move_pp
+                mover["abs_move_pp"] = abs(move_pp)
+                scored.append(mover)
+                
+            except (ValueError, TypeError) as e:
+                # Skip invalid data
+                continue
+        
+        # Sort by score descending
+        scored.sort(key=lambda x: x["quality_score"], reverse=True)
+        
+        # Assign ranks
+        for rank, mover in enumerate(scored, 1):
+            mover["rank"] = rank
+        
+        return scored
+
+
+# Default scorer instance for common use
+default_mover_scorer = MoverScorer()

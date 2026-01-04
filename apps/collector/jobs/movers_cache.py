@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from packages.core.storage.queries import MarketQueries, AnalyticsQueries, VolumeQueries
 from packages.core.storage.db import get_db_pool
 from packages.core.analytics import metrics
+from packages.core.analytics.metrics import MoverScorer
 
 logger = logging.getLogger(__name__)
 
@@ -61,11 +62,14 @@ async def update_movers_cache() -> None:
     for window in WINDOWS:
         try:
             # Fetch raw movers from the centralized query
+            # Use include_quality_score=True to get SQL-side scoring
+            # Limit to 500 (enough for top 100 after spike bonus adjustment)
             raw_movers = await asyncio.to_thread(
                 MarketQueries.get_movers_window,
                 window_seconds=window,
-                limit=1000,
-                direction="both"
+                limit=500,  # Reduced from 1000 - SQL does initial ranking
+                direction="both",
+                include_quality_score=True,
             )
 
             cache_buffer = []
@@ -111,9 +115,9 @@ async def update_movers_cache() -> None:
                     "abs_move_pp": abs_move_pp,
                     "rank": 0,  # Will be set after sorting
                     "quality_score": composite_score,  # Now stores composite score
-                    # Store spike ratio for dashboard display (via extra query if needed)
-                    "_spike_ratio": spike_ratio,
-                    "_volume": volume,
+                    # Persist volume context for dashboard display consistency
+                    "volume_24h": volume,
+                    "spike_ratio": spike_ratio,
                 })
 
             # CRITICAL: Sort by composite score (quality_score) NOT by pct_change
@@ -123,9 +127,6 @@ async def update_movers_cache() -> None:
             # Assign ranks after sorting
             for rank, item in enumerate(cache_buffer, 1):
                 item['rank'] = rank
-                # Remove internal fields not stored in DB
-                item.pop('_spike_ratio', None)
-                item.pop('_volume', None)
 
             # Keep top 100 per window
             cache_buffer = cache_buffer[:100]
@@ -175,38 +176,82 @@ class MoverAlert:
     old_price: float
     new_price: float
     change_pct: float
+    move_pp: float
     detected_at: datetime
+    quality_score: Optional[float] = None
+
+# Shared scorer instance for real-time mover detection
+# Uses same weights as cache job for consistency
+_instant_scorer = MoverScorer(
+    weight_move=1.0,
+    weight_volume=1.0,
+    weight_spike=0.5,
+    min_quality_score=Decimal("0.5"),  # Lower threshold for instant detection
+)
 
 async def check_instant_mover(
     token_id: str,
     old_price: float,
     new_price: float,
-    threshold: float = 0.05  # 5% change
+    threshold_pp: float = 5.0,  # 5 percentage points
+    volume: Optional[float] = None,
 ) -> Optional[MoverAlert]:
     """
     Check if price change qualifies as instant mover.
     Called directly from WSS handler for sub-second detection.
+    
+    Uses the same scoring logic as the cache job for consistency.
+    
+    Args:
+        token_id: Token identifier
+        old_price: Previous price (0-1 range)
+        new_price: Current price (0-1 range)
+        threshold_pp: Minimum move in percentage points (default 5pp)
+        volume: Optional volume for quality scoring
     """
     if old_price <= 0:
         return None
-        
+    
+    # Calculate move in percentage points (consistent with cache)
+    move_pp = (new_price - old_price) * 100
+    abs_move_pp = abs(move_pp)
+    
+    # Quick threshold check
+    if abs_move_pp < threshold_pp:
+        return None
+    
+    # Calculate quality score if volume available
+    quality_score = None
+    if volume is not None and volume > 0:
+        score, _, _ = _instant_scorer.score(
+            price_now=Decimal(str(new_price)),
+            price_then=Decimal(str(old_price)),
+            volume=Decimal(str(volume)),
+        )
+        quality_score = float(score)
+    
+    # Also calculate percentage change for backwards compatibility
     change_pct = (new_price - old_price) / old_price
     
-    if abs(change_pct) >= threshold:
-        return MoverAlert(
-            token_id=token_id,
-            old_price=old_price,
-            new_price=new_price,
-            change_pct=change_pct,
-            detected_at=datetime.utcnow()
-        )
-    return None
+    return MoverAlert(
+        token_id=token_id,
+        old_price=old_price,
+        new_price=new_price,
+        change_pct=change_pct,
+        move_pp=move_pp,
+        detected_at=datetime.utcnow(),
+        quality_score=quality_score,
+    )
 
 async def broadcast_mover_alert(alert: MoverAlert) -> None:
     """
     Broadcast instant mover alert.
     For now just log, but could push to frontend via websocket or db alert table.
     """
-    logger.info(f"INSTANT MOVER: {alert.token_id} moved {alert.change_pct:.2%} ({alert.old_price} -> {alert.new_price})")
+    score_str = f" (score={alert.quality_score:.2f})" if alert.quality_score else ""
+    logger.info(
+        f"INSTANT MOVER: {alert.token_id} moved {alert.move_pp:+.2f}pp "
+        f"({alert.old_price:.4f} -> {alert.new_price:.4f}){score_str}"
+    )
     # TODO: Implement real alerting logic (e.g. insert into alerts table)
 

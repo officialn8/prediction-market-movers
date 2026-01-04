@@ -60,7 +60,10 @@ async def run_alerts_check() -> None:
                 token_id = str(sc.get("token_id"))
                 volume_spike_map[token_id] = Decimal(str(sc.get("spike_ratio", 0)))
         except Exception as e:
-            logger.debug(f"Could not fetch volume spikes (table may not exist): {e}")
+            # Log at warning level so schema issues don't silently disable alerts
+            logger.warning(
+                f"Could not fetch volume spikes (may indicate schema issue or missing table): {e}"
+            )
 
         alerts_generated = 0
 

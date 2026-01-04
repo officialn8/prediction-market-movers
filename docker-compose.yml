@@ -8,8 +8,9 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-pmuser}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pmpass}
       POSTGRES_DB: ${POSTGRES_DB:-prediction_movers}
-    ports:
-      - "5432:5432"
+    # Uncomment to expose Postgres externally (use pmuser/pmpass to connect)
+    # ports:
+    #   - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./migrations:/docker-entrypoint-initdb.d:ro

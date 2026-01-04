@@ -43,6 +43,9 @@ class SyncState:
     tokens_count: int = 0
     # token_id (UUID) -> last known volume_24h (float)
     volume_cache: Dict[str, float] = field(default_factory=dict)
+    # Token map cache: timestamp of last rebuild and validity duration
+    last_token_map_rebuild: Optional[float] = None
+    token_map_ttl_seconds: int = 300  # Rebuild token map every 5 minutes max
 
 
 # Module-level state
@@ -137,9 +140,11 @@ def sync_markets_and_prices(adapter: PolymarketAdapter, max_markets: int = MAX_M
                         "spread": None,
                     })
 
-                    # Update volume cache
+                    # Update volume cache with normalized key (always str UUID)
                     if pm_market.volume_24h is not None:
-                         state.volume_cache[str(token_id)] = float(pm_market.volume_24h)
+                        # Normalize: ensure token_id is string for consistent lookup
+                        cache_key = str(token_id) if not isinstance(token_id, str) else token_id
+                        state.volume_cache[cache_key] = float(pm_market.volume_24h)
 
             
             state.token_map[str(market_id)] = token_map
@@ -149,12 +154,30 @@ def sync_markets_and_prices(adapter: PolymarketAdapter, max_markets: int = MAX_M
             logger.warning(f"Failed to sync market {pm_market.condition_id}: {e}")
             continue
     
-    # Batch insert all snapshots (deduplicated)
+    # Batch insert all snapshots
+    # Note: We keep only the last snapshot per token_id in a single sync cycle
+    # since they'd have the same timestamp anyway. DB has ON CONFLICT DO NOTHING
+    # for (token_id, ts) uniqueness, so multiple updates in same second are safe.
     snapshots_inserted = 0
     if snapshots:
-        # Deduplicate by token_id to prevent "duplicate key" errors in same batch
-        unique_snapshots = {s["token_id"]: s for s in snapshots}.values()
-        snapshots_inserted = MarketQueries.insert_snapshots_batch(list(unique_snapshots))
+        # Keep last snapshot per token to avoid duplicate key errors in same batch
+        # but log if we're losing data (indicates multiple tokens with same ID)
+        seen_tokens = {}
+        for s in snapshots:
+            token_key = str(s["token_id"])
+            if token_key in seen_tokens:
+                logger.debug(
+                    f"Duplicate token_id in batch: {token_key}, "
+                    f"price {seen_tokens[token_key]['price']} -> {s['price']}"
+                )
+            seen_tokens[token_key] = s
+        
+        if len(seen_tokens) < len(snapshots):
+            logger.debug(
+                f"Deduplicated {len(snapshots)} snapshots to {len(seen_tokens)} unique tokens"
+            )
+        
+        snapshots_inserted = MarketQueries.insert_snapshots_batch(list(seen_tokens.values()))
     
     elapsed = time.time() - start_time
     state.last_market_sync = time.time()
@@ -187,7 +210,14 @@ def sync_prices(adapter: PolymarketAdapter, use_clob: bool = True) -> int:
     """
     state = get_sync_state()
     
-    if not state.source_to_db_token:
+    # Check if token map needs rebuilding (empty or stale)
+    needs_rebuild = (
+        not state.source_to_db_token
+        or state.last_token_map_rebuild is None
+        or (time.time() - state.last_token_map_rebuild) > state.token_map_ttl_seconds
+    )
+    
+    if needs_rebuild:
         _rebuild_token_map()
     
     if not state.source_to_db_token:
@@ -223,10 +253,12 @@ def sync_prices(adapter: PolymarketAdapter, use_clob: bool = True) -> int:
             for source_token_id, token_price in prices.items():
                 db_token_id = state.source_to_db_token.get(source_token_id)
                 if db_token_id:
+                    # Normalize key for volume cache lookup (consistent with store)
+                    cache_key = str(db_token_id) if not isinstance(db_token_id, str) else db_token_id
                     snapshots.append({
                         "token_id": db_token_id,
                         "price": token_price.price,
-                        "volume_24h": state.volume_cache.get(str(db_token_id)),
+                        "volume_24h": state.volume_cache.get(cache_key),
                         "spread": token_price.spread,
                     })
     
@@ -276,19 +308,30 @@ def sync_prices(adapter: PolymarketAdapter, use_clob: bool = True) -> int:
 
 
 def _rebuild_token_map() -> None:
-    """Rebuild the source_token_id -> db_token_id map from database."""
+    """
+    Rebuild the source_token_id -> db_token_id map from database.
+    
+    Only includes tokens from active markets that haven't ended yet.
+    This ensures we don't waste resources syncing prices for closed markets.
+    
+    Uses caching to avoid full DB scans on every price sync cycle.
+    """
     state = get_sync_state()
     state.source_to_db_token.clear()
     
     db = get_db_pool()
     
-    # Get all polymarket tokens
+    # Get polymarket tokens only from active, non-expired markets
+    # This aligns token status with market status
     query = """
         SELECT mt.token_id, mt.source_token_id
         FROM market_tokens mt
         JOIN markets m ON mt.market_id = m.market_id
-        WHERE m.source = %s AND m.status = 'active'
-        AND mt.source_token_id IS NOT NULL
+        WHERE m.source = %s 
+          AND m.status = 'active'
+          AND mt.source_token_id IS NOT NULL
+          -- Exclude markets that have ended (no point syncing prices)
+          AND (m.end_date IS NULL OR m.end_date > NOW())
     """
     
     result = db.execute(query, (SOURCE_NAME,), fetch=True)
@@ -299,7 +342,10 @@ def _rebuild_token_map() -> None:
             db_token_id = UUID(str(row["token_id"]))
             state.source_to_db_token[source_token_id] = db_token_id
     
-    logger.info(f"Rebuilt token map with {len(state.source_to_db_token)} tokens")
+    # Record rebuild timestamp for cache TTL
+    state.last_token_map_rebuild = time.time()
+    
+    logger.info(f"Rebuilt token map with {len(state.source_to_db_token)} active tokens")
 
 
 def should_sync_markets() -> bool:
