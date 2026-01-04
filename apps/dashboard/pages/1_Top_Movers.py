@@ -1,5 +1,5 @@
 """
-Top Movers Page - 'The Simplest, Most Informative Display'
+Advanced Movers - Extended filtering and analysis view
 """
 
 import streamlit as st
@@ -8,189 +8,189 @@ from datetime import datetime
 
 from packages.core.storage import get_db_pool
 from packages.core.storage.queries import MarketQueries, AnalyticsQueries
-from apps.dashboard.components import render_mover_card, init_watchlist, to_user_tz
+from apps.dashboard.components import render_mover_card, init_watchlist, format_volume
 
 st.set_page_config(
-    page_title="What's Moving Now | PM Movers",
-    page_icon="🔥",
+    page_title="Advanced Movers | PM Movers",
+    page_icon="📊",
     layout="wide",
 )
 
-# Custom styling for simplified list view
-st.markdown("""
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+# Inherit theme from main app
+def get_theme_css():
+    """Get theme CSS based on session state."""
+    dark_mode = st.session_state.get("dark_mode", False)
     
-    .stApp {
-        font-family: 'Inter', sans-serif;
-    }
+    if dark_mode:
+        return """
+        <style>
+            @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+            
+            :root {
+                --pm-bg: #0c0c10;
+                --pm-surface: #14141a;
+                --pm-surface-2: #1c1c24;
+                --pm-border: #2a2a36;
+                --pm-accent: #6366f1;
+                --pm-green: #10b981;
+                --pm-green-bg: rgba(16, 185, 129, 0.12);
+                --pm-red: #ef4444;
+                --pm-red-bg: rgba(239, 68, 68, 0.12);
+                --pm-text: #f4f4f5;
+                --pm-text-secondary: #a1a1aa;
+                --pm-text-muted: #71717a;
+            }
+            
+            .stApp { background: var(--pm-bg) !important; }
+            section[data-testid="stSidebar"] { background: var(--pm-surface) !important; }
+        </style>
+        """
+    else:
+        return """
+        <style>
+            @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+            
+            :root {
+                --pm-bg: #fafafa;
+                --pm-surface: #ffffff;
+                --pm-surface-2: #f4f4f5;
+                --pm-border: #e4e4e7;
+                --pm-accent: #4f46e5;
+                --pm-green: #059669;
+                --pm-green-bg: rgba(5, 150, 105, 0.08);
+                --pm-red: #dc2626;
+                --pm-red-bg: rgba(220, 38, 38, 0.08);
+                --pm-text: #18181b;
+                --pm-text-secondary: #52525b;
+                --pm-text-muted: #a1a1aa;
+            }
+            
+            .stApp { background: var(--pm-bg) !important; }
+            section[data-testid="stSidebar"] { background: var(--pm-surface) !important; }
+        </style>
+        """
 
-    h1 {
-        font-family: 'Inter', sans-serif;
-        font-weight: 700;
-        font-size: 1.5rem !important;
-        margin-bottom: 0rem !important;
-    }
-    
-    .stRadio > div {
-        display: flex;
-        flex-direction: row;
-        gap: 1rem;
-    }
-    
-</style>
-""", unsafe_allow_html=True)
-
-
-from packages.core.wss import WSSMetrics
-
-def render_wss_status():
-    """Show WSS connection status and metrics in sidebar."""
-    metrics = WSSMetrics.load()
-    
-    st.sidebar.markdown("### 🔌 Real-Time Status")
-    
-    color = "green" if metrics.mode == "wss" else "orange" if metrics.mode == "polling" else "red"
-    st.sidebar.markdown(f"**Mode:** <span style='color:{color}'>{metrics.mode.upper()}</span>", unsafe_allow_html=True)
-    
-    if metrics.mode == "wss":
-        c1, c2 = st.sidebar.columns(2)
-        c1.metric("Msg/s", f"{metrics.messages_per_second:.1f}")
-        c2.metric("Subs", f"{metrics.current_subscriptions}")
-        
-        age = metrics.last_message_age_seconds
-        st.sidebar.caption(f"Last update: {age:.1f}s ago")
 
 def main():
-    # Initialize watchlist
     init_watchlist()
-    render_wss_status()
-
-    # Search Bar (Top)
-    search_query = st.text_input("🔍 Search Markets", placeholder="trump, bitcoin, fed...", label_visibility="collapsed")
-    if search_query:
-        st.caption(f"Searching for '{search_query}'...")
-        results = MarketQueries.search_markets(search_query)
-        if not results:
-            st.info("No matching markets found.")
-        else:
-            ids = [str(r['market_id']) for r in results]
-            full_data = MarketQueries.get_markets_batch_with_prices(ids)
-            for market in full_data:
-                 tokens = market.get('tokens', [])
-                 if not tokens: continue
-                 top_token = tokens[0]
-                 mover_wrapper = {
-                    'market_id': market['market_id'],
-                    'token_id': top_token.get('token_id'),
-                    'title': market['title'],
-                    'source': market['source'],
-                    'category': market['category'],
-                    'outcome': top_token.get('outcome'),
-                    'latest_price': top_token.get('latest_price', 0),
-                    'latest_volume': top_token.get('latest_volume', 0),
-                    'pct_change': 0, 'old_price': 0
-                }
-                 render_mover_card(mover_wrapper)
-        if st.button("Clear Search"): st.rerun()
-        return
-
-    # Header & Time Toggle
-    col_header, col_toggle = st.columns([1, 1])
-    with col_header:
-        st.markdown("# What's Moving Now")
     
-    with col_toggle:
-        # Timeframe toggle (Horizontal Radio)
-        # Options: 5m, 1h, 24h, 7d
-        # Default: 1h
-        tf_map = {"5m": 5, "1h": 60, "24h": 1440, "7d": 10080}
-        display_map = {"5m": "⏱️ 5min", "1h": "1hr", "24h": "24hr", "7d": "7day"}
-        
-        selected_label = st.radio(
-            "Timeframe",
-            options=["5m", "1h", "24h", "7d"],
-            index=1,
-            format_func=lambda x: display_map[x],
-            horizontal=True,
-            label_visibility="collapsed"
-        )
-        window_minutes = tf_map[selected_label]
-
-    # Category Filter
-    CATEGORIES = [
-        "Politics", "Sports", "Crypto", "Finance", "Geopolitics", 
-        "Earnings", "Tech", "Culture", "World", "Economy", 
-        "Climate & Science", "Elections"
-    ]
+    # Apply theme
+    st.markdown(get_theme_css(), unsafe_allow_html=True)
     
-    # Use pills if available (Streamlit 1.40+), otherwise fallback to selectbox
-    selected_category = "All"
-    if hasattr(st, "pills"):
-        selected_category = st.pills(
-            "Category",
-            options=["All"] + CATEGORIES,
-            default="All",
-            selection_mode="single",
-            label_visibility="collapsed"
-        )
-    else:
-        selected_category = st.selectbox(
-            "Category",
-            options=["All"] + CATEGORIES,
-            index=0,
-            label_visibility="visible" # Make it visible so they know what it is if it's a dropdown
-        )
+    st.title("📊 Advanced Movers")
+    st.caption("Extended filtering and analysis for power users")
+    
+    # Advanced filters in columns
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        tf_options = {
+            "5 minutes": 5,
+            "15 minutes": 15,
+            "30 minutes": 30,
+            "1 hour": 60,
+            "4 hours": 240,
+            "12 hours": 720,
+            "24 hours": 1440,
+            "7 days": 10080,
+        }
+        selected_tf = st.selectbox("Timeframe", options=list(tf_options.keys()), index=3)
+        window_minutes = tf_options[selected_tf]
+    
+    with col2:
+        CATEGORIES = [
+            "All Categories", "Politics", "Sports", "Crypto", "Finance", 
+            "Geopolitics", "Earnings", "Tech", "Culture", "World", 
+            "Economy", "Climate & Science", "Elections"
+        ]
+        selected_category = st.selectbox("Category", options=CATEGORIES)
+        category_filter = None if selected_category == "All Categories" else selected_category
+    
+    with col3:
+        direction_options = {
+            "Both": "both",
+            "Gainers Only": "up",
+            "Losers Only": "down",
+        }
+        selected_direction = st.selectbox("Direction", options=list(direction_options.keys()))
+        direction = direction_options[selected_direction]
+    
+    with col4:
+        source_options = ["All Sources", "Polymarket", "Kalshi"]
+        selected_source = st.selectbox("Source", options=source_options)
+        source_filter = None if selected_source == "All Sources" else selected_source.lower()
+    
+    # Additional filters
+    with st.expander("🔧 More Filters"):
+        col_a, col_b, col_c = st.columns(3)
         
-    category_filter = None if selected_category == "All" else selected_category
-
+        with col_a:
+            min_change = st.number_input("Min % Change", value=0.0, step=1.0)
+        
+        with col_b:
+            min_volume = st.number_input("Min Volume ($)", value=0, step=1000)
+        
+        with col_c:
+            limit = st.slider("Results Limit", min_value=10, max_value=100, value=50)
+    
     st.markdown("---")
-
-    # Fetch Data
+    
+    # Fetch and display movers
     try:
         window_seconds = window_minutes * 60
         movers = []
         
-        # Use Cached or Raw (Standard Windows)
+        # Try cached first for standard windows
         cached_windows = [300, 3600, 86400]
-        used_cache = False
-        
         if window_seconds in cached_windows:
             movers = AnalyticsQueries.get_cached_movers(
                 window_seconds=window_seconds,
-                limit=50, # Show more for list view
+                limit=limit,
                 category=category_filter,
-                direction="both"
+                direction=direction
             )
-            used_cache = True
-            
+        
         if not movers:
             movers = MarketQueries.get_movers_window(
                 window_seconds=window_seconds,
-                limit=50,
+                limit=limit,
                 category=category_filter,
-                direction="both"
+                direction=direction
             )
-
-        if not movers:
-            if category_filter:
-                st.info(f"No top movers found in '{category_filter}' for this timeframe.")
-            else:
-                st.info("Waiting for first update... (Ensure collector is running)")
-            return
-
-        # List Display (The 'Killer View')
-        for mover in movers:
-            render_mover_card(mover)
+        
+        # Apply additional filters
+        if source_filter:
+            movers = [m for m in movers if m.get('source', '').lower() == source_filter]
+        
+        if min_change > 0:
+            movers = [m for m in movers if abs(float(m.get('pct_change') or m.get('move_pp') or 0)) >= min_change]
+        
+        if min_volume > 0:
+            movers = [m for m in movers if float(m.get('latest_volume') or m.get('current_volume') or 0) >= min_volume]
+        
+        # Stats summary
+        if movers:
+            gainers = [m for m in movers if float(m.get('pct_change') or m.get('move_pp') or 0) > 0]
+            losers = [m for m in movers if float(m.get('pct_change') or m.get('move_pp') or 0) < 0]
             
-        # Footer
-        st.markdown("<br><br>", unsafe_allow_html=True)
-        with st.expander("Advanced Filters"):
-             st.write("Source: All")
-             st.write("Sort: Absolute Change")
-    
+            col_s1, col_s2, col_s3 = st.columns(3)
+            col_s1.metric("Total Results", len(movers))
+            col_s2.metric("Gainers", len(gainers), delta=None)
+            col_s3.metric("Losers", len(losers), delta=None)
+            
+            st.markdown("---")
+        
+        if not movers:
+            st.info("No movers found with these filters. Try adjusting your criteria.")
+            return
+        
+        # Display as cards
+        for mover in movers:
+            render_mover_card(mover, show_watchlist=True)
+            
     except Exception as e:
-        st.error(f"Error: {e}")
+        st.error(f"Error loading data: {e}")
+
 
 if __name__ == "__main__":
     main()
