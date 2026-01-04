@@ -40,7 +40,8 @@ async def run_alerts_check() -> None:
 
     try:
         # Get top movers for analysis
-        movers = MarketQueries.get_top_movers(
+        movers = await asyncio.to_thread(
+            MarketQueries.get_top_movers,
             hours=ALERT_WINDOW_HOURS,
             limit=100,
             direction="both"
@@ -49,7 +50,8 @@ async def run_alerts_check() -> None:
         # Get volume spike data for enrichment
         volume_spike_map = {}
         try:
-            spike_candidates = VolumeQueries.get_volume_spike_candidates(
+            spike_candidates = await asyncio.to_thread(
+                VolumeQueries.get_volume_spike_candidates,
                 min_spike_ratio=float(COMBINED_SPIKE_THRESHOLD),
                 min_volume=float(MIN_VOLUME_FOR_ALERT),
                 limit=200,
@@ -106,7 +108,8 @@ async def run_alerts_check() -> None:
 
                 # Deduplication: Check recent alerts
                 window_seconds = ALERT_WINDOW_HOURS * 3600
-                existing = AnalyticsQueries.get_recent_alert_for_token(
+                existing = await asyncio.to_thread(
+                    AnalyticsQueries.get_recent_alert_for_token,
                     token_id=token_id,
                     window_seconds=window_seconds,
                     lookback_minutes=30
@@ -144,7 +147,8 @@ async def run_alerts_check() -> None:
                 reason_text = " | ".join(alert_parts)
 
                 # Insert alert
-                AnalyticsQueries.insert_alert(
+                await asyncio.to_thread(
+                    AnalyticsQueries.insert_alert,
                     token_id=token_id,
                     window_seconds=window_seconds,
                     move_pp=move_pp,
@@ -177,7 +181,8 @@ async def check_volume_only_alerts() -> None:
 
     try:
         # Get volume spikes that might not have price movement yet
-        spikes = VolumeQueries.get_volume_spike_candidates(
+        spikes = await asyncio.to_thread(
+            VolumeQueries.get_volume_spike_candidates,
             min_spike_ratio=float(VOLUME_SPIKE_THRESHOLD),
             min_volume=float(MIN_VOLUME_FOR_ALERT),
             limit=50,
@@ -200,7 +205,8 @@ async def check_volume_only_alerts() -> None:
                     continue
 
                 # Check for existing recent alert
-                existing = VolumeQueries.get_recent_spike_for_token(
+                existing = await asyncio.to_thread(
+                    VolumeQueries.get_recent_spike_for_token,
                     token_id=token_id,
                     lookback_minutes=60,
                 )
@@ -211,7 +217,8 @@ async def check_volume_only_alerts() -> None:
                         continue
 
                 # Record the spike
-                VolumeQueries.insert_volume_spike(
+                await asyncio.to_thread(
+                    VolumeQueries.insert_volume_spike,
                     token_id=token_id,
                     current_volume=current_volume,
                     avg_volume=avg_volume,
@@ -228,7 +235,8 @@ async def check_volume_only_alerts() -> None:
                     f"[{severity.upper()}]"
                 )
 
-                AnalyticsQueries.insert_alert(
+                await asyncio.to_thread(
+                    AnalyticsQueries.insert_alert,
                     token_id=token_id,
                     window_seconds=3600,
                     move_pp=Decimal("0"),

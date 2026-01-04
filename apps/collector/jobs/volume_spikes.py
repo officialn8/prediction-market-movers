@@ -38,7 +38,8 @@ async def check_volume_spikes() -> None:
 
     try:
         # Get all tokens with potential volume spikes
-        candidates = VolumeQueries.get_volume_spike_candidates(
+        candidates = await asyncio.to_thread(
+            VolumeQueries.get_volume_spike_candidates,
             min_spike_ratio=float(MIN_SPIKE_RATIO),
             min_volume=float(MIN_VOLUME),
             limit=200,
@@ -69,7 +70,8 @@ async def check_volume_spikes() -> None:
                     continue
 
                 # Deduplication: Check if we recently recorded a spike for this token
-                existing = VolumeQueries.get_recent_spike_for_token(
+                existing = await asyncio.to_thread(
+                    VolumeQueries.get_recent_spike_for_token,
                     token_id=token_id,
                     lookback_minutes=LOOKBACK_MINUTES,
                 )
@@ -86,7 +88,8 @@ async def check_volume_spikes() -> None:
                 # Get 1h price change for context
                 price_change_1h = None
                 try:
-                    movers = MarketQueries.get_movers_window(
+                    movers = await asyncio.to_thread(
+                        MarketQueries.get_movers_window,
                         window_seconds=3600,
                         limit=1000,
                         direction="both",
@@ -99,7 +102,8 @@ async def check_volume_spikes() -> None:
                     pass
 
                 # Record the volume spike
-                VolumeQueries.insert_volume_spike(
+                await asyncio.to_thread(
+                    VolumeQueries.insert_volume_spike,
                     token_id=token_id,
                     current_volume=current_volume,
                     avg_volume=avg_volume,
@@ -157,7 +161,8 @@ async def _generate_volume_alert(
     """
     try:
         # Check for recent volume alert on this token (separate from price alerts)
-        existing = AnalyticsQueries.get_recent_alert_for_token(
+        existing = await asyncio.to_thread(
+            AnalyticsQueries.get_recent_alert_for_token,
             token_id=token_id,
             window_seconds=3600,  # Use 1h window for volume alerts
             lookback_minutes=30,
@@ -187,7 +192,8 @@ async def _generate_volume_alert(
         )
 
         # Insert alert with volume context
-        AnalyticsQueries.insert_alert(
+        await asyncio.to_thread(
+            AnalyticsQueries.insert_alert,
             token_id=token_id,
             window_seconds=3600,
             move_pp=price_change_1h or Decimal("0"),
@@ -209,7 +215,8 @@ async def get_volume_spike_summary() -> dict:
     """
     try:
         # Get recent spikes by severity
-        spikes = VolumeQueries.get_recent_volume_spikes(
+        spikes = await asyncio.to_thread(
+            VolumeQueries.get_recent_volume_spikes,
             limit=100,
             min_severity="low",
             unacknowledged_only=False,
