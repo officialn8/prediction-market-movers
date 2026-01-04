@@ -314,9 +314,17 @@ class MarketQueries:
                 SELECT DISTINCT ON (token_id)
                     token_id,
                     ts as latest_ts,
-                    price as latest_price,
+                    price as latest_price
+                FROM snapshots
+                ORDER BY token_id, ts DESC
+            ),
+            latest_volume AS (
+                -- Get latest NON-NULL volume (from REST syncs, not WSS which has NULL volume)
+                SELECT DISTINCT ON (token_id)
+                    token_id,
                     volume_24h as latest_volume
                 FROM snapshots
+                WHERE volume_24h IS NOT NULL
                 ORDER BY token_id, ts DESC
             ),
             historical AS (
@@ -332,7 +340,7 @@ class MarketQueries:
                     l.token_id,
                     l.latest_ts,
                     l.latest_price,
-                    l.latest_volume,
+                    COALESCE(lv.latest_volume, 0) as latest_volume,
                     h.old_price,
                     CASE
                         WHEN h.old_price > 0 THEN
@@ -341,6 +349,7 @@ class MarketQueries:
                     END as pct_change
                 FROM latest l
                 JOIN historical h ON l.token_id = h.token_id
+                LEFT JOIN latest_volume lv ON l.token_id = lv.token_id
             )
             SELECT
                 c.*,
@@ -406,9 +415,17 @@ class MarketQueries:
                 SELECT DISTINCT ON (token_id)
                     token_id,
                     ts as latest_ts,
-                    price as latest_price,
+                    price as latest_price
+                FROM snapshots
+                ORDER BY token_id, ts DESC
+            ),
+            latest_volume AS (
+                -- Get latest NON-NULL volume (from REST syncs, not WSS which has NULL volume)
+                SELECT DISTINCT ON (token_id)
+                    token_id,
                     volume_24h as latest_volume
                 FROM snapshots
+                WHERE volume_24h IS NOT NULL
                 ORDER BY token_id, ts DESC
             ),
             historical AS (
@@ -424,7 +441,7 @@ class MarketQueries:
                     l.token_id,
                     l.latest_ts,
                     l.latest_price,
-                    l.latest_volume,
+                    COALESCE(lv.latest_volume, 0) as latest_volume,
                     h.old_price,
                     CASE
                         WHEN h.old_price > 0 THEN
@@ -433,6 +450,7 @@ class MarketQueries:
                     END as pct_change
                 FROM latest l
                 JOIN historical h ON l.token_id = h.token_id
+                LEFT JOIN latest_volume lv ON l.token_id = lv.token_id
             )
             SELECT
                 c.*,
@@ -490,6 +508,7 @@ class MarketQueries:
                         'latest_volume', (
                             SELECT volume_24h FROM snapshots 
                             WHERE token_id = mt.token_id 
+                              AND volume_24h IS NOT NULL
                             ORDER BY ts DESC LIMIT 1
                         )
                     )
@@ -573,6 +592,7 @@ class MarketQueries:
                         'latest_volume', (
                             SELECT volume_24h FROM snapshots 
                             WHERE token_id = mt.token_id 
+                              AND volume_24h IS NOT NULL
                             ORDER BY ts DESC LIMIT 1
                         )
                     )
@@ -738,12 +758,22 @@ class AnalyticsQueries:
                 SELECT MAX(as_of_ts) as max_ts
                 FROM movers_cache
                 WHERE window_seconds = %s
+            ),
+            latest_volume AS (
+                -- Get latest NON-NULL volume (from REST syncs, not WSS which has NULL volume)
+                SELECT DISTINCT ON (token_id)
+                    token_id,
+                    volume_24h as latest_volume
+                FROM snapshots
+                WHERE volume_24h IS NOT NULL
+                ORDER BY token_id, ts DESC
             )
             SELECT 
                 mc.*,
                 mc.move_pp as pct_change, -- Alias for compat
                 mc.price_now as latest_price,
                 mc.price_then as old_price,
+                COALESCE(lv.latest_volume, 0) as latest_volume,
                 mt.market_id,
                 mt.outcome,
                 mt.symbol,
@@ -755,6 +785,7 @@ class AnalyticsQueries:
             JOIN latest_batch lb ON mc.as_of_ts = lb.max_ts
             JOIN market_tokens mt ON mc.token_id = mt.token_id
             JOIN markets m ON mt.market_id = m.market_id
+            LEFT JOIN latest_volume lv ON mc.token_id = lv.token_id
             WHERE mc.window_seconds = %s
               {source_filter}
               {category_filter}
