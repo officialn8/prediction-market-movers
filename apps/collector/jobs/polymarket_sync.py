@@ -41,6 +41,8 @@ class SyncState:
     last_gamma_markets: Optional[list] = None  # Cache of recent markets
     markets_count: int = 0
     tokens_count: int = 0
+    # token_id (UUID) -> last known volume_24h (float)
+    volume_cache: Dict[str, float] = field(default_factory=dict)
 
 
 # Module-level state
@@ -134,6 +136,11 @@ def sync_markets_and_prices(adapter: PolymarketAdapter, max_markets: int = MAX_M
                         "volume_24h": pm_market.volume_24h,
                         "spread": None,
                     })
+
+                    # Update volume cache
+                    if pm_market.volume_24h is not None:
+                         state.volume_cache[str(token_id)] = float(pm_market.volume_24h)
+
             
             state.token_map[str(market_id)] = token_map
             synced_count += 1
@@ -219,7 +226,7 @@ def sync_prices(adapter: PolymarketAdapter, use_clob: bool = True) -> int:
                     snapshots.append({
                         "token_id": db_token_id,
                         "price": token_price.price,
-                        "volume_24h": None,
+                        "volume_24h": state.volume_cache.get(str(db_token_id)),
                         "spread": token_price.spread,
                     })
     

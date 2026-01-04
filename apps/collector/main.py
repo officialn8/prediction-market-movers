@@ -92,6 +92,24 @@ async def run_simulated(shutdown: Shutdown, every_seconds: int = 15) -> None:
         logger.info("Simulated loop interrupted.")
 
 
+
+async def run_polymarket_wss(shutdown: Shutdown) -> None:
+    """
+    Run WebSocket-based real-time sync.
+    Falls back to polling on disconnect.
+    """
+    try:
+        from apps.collector.jobs.polymarket_wss_sync import run_wss_loop
+        logger.info("Starting Polymarket WSS real-time sync")
+        await run_wss_loop(shutdown)
+    except ImportError as e:
+        logger.critical(f"Failed to import WSS module (missing dependencies?): {e}")
+        raise
+    except Exception as e:
+        logger.critical(f"WSS Loop failed: {e}")
+        raise
+
+
 async def run_polymarket(shutdown: Shutdown, every_seconds: int = 30) -> None:
     """
     Run Polymarket-only sync loop.
@@ -100,6 +118,13 @@ async def run_polymarket(shutdown: Shutdown, every_seconds: int = 30) -> None:
 
     logger.info(f"Polymarket sync starting (interval={every_seconds}s)")
     
+    # Check if WSS is enabled
+    if settings.polymarket_use_wss:
+        logger.info("Mode: polymarket (WSS real-time)")
+        await run_polymarket_wss(shutdown)
+        return
+
+    logger.info("Mode: polymarket (POLLING)")
     while not shutdown.is_set:
         try:
             await poly_sync_once()
