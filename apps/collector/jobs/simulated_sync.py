@@ -113,10 +113,27 @@ def write_simulated_snapshots(sim: SimState) -> int:
     return MarketQueries.insert_snapshots_batch(snapshots)
 
 
-def run_simulated_loop(n_markets: int = 30, every_seconds: int = 15) -> None:
+def run_simulated_loop(
+    n_markets: int = 30,
+    every_seconds: int = 15,
+    stop_flag: callable = None,
+) -> None:
+    """
+    Run simulated sync loop.
+    
+    Args:
+        n_markets: Number of simulated markets to create
+        every_seconds: Interval between snapshot writes
+        stop_flag: Optional callable that returns True to stop the loop
+    """
     sim = seed_simulated_markets(n_markets=n_markets)
 
     while True:
+        # Check stop flag if provided
+        if stop_flag is not None and stop_flag():
+            print("[simulated] Stop flag set, exiting loop")
+            break
+            
         inserted = write_simulated_snapshots(sim)
         print(f"[simulated] inserted_snapshots={inserted}")
         time.sleep(every_seconds)

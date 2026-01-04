@@ -328,6 +328,7 @@ class PolymarketAdapter:
             return {}
         
         prices = {}
+        requested_count = len(token_ids)
         
         # Fetch from CLOB API in batches
         batch_size = 50
@@ -339,10 +340,37 @@ class PolymarketAdapter:
         except Exception as e:
             logger.error(f"Error in batch price fetch loop: {e}")
             # Return partial results if we strictly need to, or just whatever we have.
-            # We continue to return what we have.
             pass
         
-        logger.info(f"Fetched prices for {len(prices)}/{len(token_ids)} tokens")
+        # Validation: Check response quality
+        returned_count = len(prices)
+        
+        if returned_count == 0 and requested_count > 0:
+            logger.warning(
+                f"CLOB API returned 0 prices for {requested_count} requested tokens. "
+                f"Possible causes: API issue, identifier mismatch, or rate limiting."
+            )
+        elif returned_count < requested_count * 0.5:
+            # Less than 50% response rate
+            logger.warning(
+                f"CLOB API partial response: {returned_count}/{requested_count} tokens "
+                f"({returned_count/requested_count*100:.1f}%). Some tokens may have stale prices."
+            )
+            
+            # Log sample of missing tokens for debugging (first 5)
+            returned_ids = set(prices.keys())
+            missing_ids = [tid for tid in token_ids if tid not in returned_ids][:5]
+            if missing_ids:
+                logger.debug(f"Sample missing token_ids: {missing_ids}")
+                
+        elif returned_count < requested_count:
+            # Between 50-100% - log at debug level
+            logger.debug(
+                f"CLOB API: {returned_count}/{requested_count} tokens returned "
+                f"({(requested_count - returned_count)} missing)"
+            )
+        
+        logger.info(f"Fetched prices for {returned_count}/{requested_count} tokens")
         return prices
 
     def fetch_price_single(self, token_id: str) -> Optional[TokenPrice]:

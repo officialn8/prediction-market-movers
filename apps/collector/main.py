@@ -20,8 +20,18 @@ logger = logging.getLogger("collector")
 
 
 def run_migrations() -> None:
-    """Run SQL migrations on startup."""
+    """
+    Run SQL migrations on startup with proper tracking and transactional guarantees.
+    
+    Features:
+    - Tracks applied migrations in schema_migrations table
+    - Each migration runs in a transaction (rollback on failure)
+    - Stops on first failure to prevent partial state
+    - Idempotent: skips already-applied migrations
+    """
     import glob
+    import hashlib
+    import os
     from packages.core.storage.db import get_db_pool
     
     db = get_db_pool()
@@ -31,25 +41,98 @@ def run_migrations() -> None:
         logger.info("No migrations found.")
         return
 
-    logger.info(f"Found {len(migration_files)} migrations. Applying...")
+    # Bootstrap: Ensure schema_migrations table exists (special handling)
+    # This must succeed before we can track anything
+    try:
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                migration_name TEXT PRIMARY KEY,
+                applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                checksum TEXT
+            )
+        """)
+    except Exception as e:
+        logger.error(f"Failed to create schema_migrations table: {e}")
+        raise
 
+    # Get already-applied migrations
+    applied = set()
+    try:
+        rows = db.execute("SELECT migration_name FROM schema_migrations", fetch=True)
+        if rows:
+            applied = {r["migration_name"] for r in rows}
+    except Exception as e:
+        logger.warning(f"Could not query schema_migrations (first run?): {e}")
+
+    logger.info(f"Found {len(migration_files)} migrations, {len(applied)} already applied.")
+
+    applied_count = 0
     for mig in migration_files:
+        migration_name = os.path.basename(mig)
+        
+        # Skip if already applied
+        if migration_name in applied:
+            logger.debug(f"Skipping already-applied migration: {migration_name}")
+            continue
+        
+        # Read migration content
         try:
             with open(mig) as f:
-                db.execute(f.read())
-            logger.info(f"Applied migration: {mig}")
+                sql_content = f.read()
         except Exception as e:
-            # Check for "already exists" type errors (DuplicateObject, etc.)
-            # This is a basic catch-all for idempotency on dirty DBs
+            logger.error(f"Failed to read migration file {mig}: {e}")
+            raise
+        
+        # Compute checksum for tracking
+        checksum = hashlib.sha256(sql_content.encode()).hexdigest()[:16]
+        
+        # Apply migration within a transaction
+        try:
+            with db.get_connection() as conn:
+                with conn.cursor() as cur:
+                    # Execute the migration
+                    cur.execute(sql_content)
+                    
+                    # Record successful application
+                    cur.execute(
+                        """
+                        INSERT INTO schema_migrations (migration_name, checksum)
+                        VALUES (%s, %s)
+                        ON CONFLICT (migration_name) DO NOTHING
+                        """,
+                        (migration_name, checksum)
+                    )
+                    
+                # Commit the transaction (both migration and tracking record)
+                conn.commit()
+                
+            logger.info(f"Applied migration: {migration_name}")
+            applied_count += 1
+            
+        except Exception as e:
             err = str(e).lower()
-            if "already exists" in err or "violates unique constraint" in err:
-                logger.warning(f"Migration {mig} skipped (likely already applied): {e}")
+            # Handle benign "already exists" errors (for legacy/dirty DBs)
+            if "already exists" in err or "duplicate key" in err:
+                logger.warning(f"Migration {migration_name} objects exist, marking as applied: {e}")
+                # Still record it as applied so we don't retry
+                try:
+                    db.execute(
+                        """
+                        INSERT INTO schema_migrations (migration_name, checksum)
+                        VALUES (%s, %s)
+                        ON CONFLICT (migration_name) DO NOTHING
+                        """,
+                        (migration_name, checksum)
+                    )
+                except Exception:
+                    pass  # Best effort
             else:
-                logger.error(f"Migration failed {mig}: {e}")
-                # We stop on critical errors, but maybe we should let it try the constraint fix?
-                # If 001 fails, we usually want to stop. But if it fails because it exists, we continue.
-                # If 008 (the fix) runs, it needs to succeed.
-                raise
+                # Transaction was rolled back, stop processing
+                logger.error(f"Migration {migration_name} failed (rolled back): {e}")
+                raise RuntimeError(f"Migration {migration_name} failed: {e}") from e
+    
+    if applied_count > 0:
+        logger.info(f"Successfully applied {applied_count} new migration(s).")
 
 
 
@@ -79,35 +162,70 @@ class Shutdown:
 
 async def run_simulated(shutdown: Shutdown, every_seconds: int = 15) -> None:
     """
-    Runs the simulated data loop. Prefer keeping the loop here so SIGTERM works cleanly.
+    Runs the simulated data loop with proper shutdown support.
     """
-    from apps.collector.jobs.simulated_sync import run_simulated_loop
+    from apps.collector.jobs.simulated_sync import seed_simulated_markets, write_simulated_snapshots
 
-    # If your run_simulated_loop doesn't support stop flags, run it in a thread
-    # and rely on SIGTERM causing process exit. Better: refactor simulated_sync
-    # to accept a stop flag. For now, keep it simple:
-    try:
-        run_simulated_loop(n_markets=30, every_seconds=every_seconds)
-    except KeyboardInterrupt:
-        logger.info("Simulated loop interrupted.")
+    logger.info(f"Starting simulated sync (interval={every_seconds}s)")
+    
+    # Seed markets once
+    sim = seed_simulated_markets(n_markets=30)
+    
+    while not shutdown.is_set:
+        try:
+            inserted = write_simulated_snapshots(sim)
+            logger.debug(f"[simulated] inserted_snapshots={inserted}")
+        except Exception:
+            logger.exception("Error in simulated sync cycle")
+        
+        # Interruptible sleep
+        try:
+            await asyncio.wait_for(shutdown.wait(), timeout=every_seconds)
+            break  # Shutdown triggered
+        except asyncio.TimeoutError:
+            continue  # Normal timeout, continue loop
+    
+    logger.info("Simulated loop stopped.")
 
 
 
 async def run_polymarket_wss(shutdown: Shutdown) -> None:
     """
     Run WebSocket-based real-time sync.
-    Falls back to polling on disconnect.
+    Falls back to polling if WSS fails to import or initialize.
     """
     try:
         from apps.collector.jobs.polymarket_wss_sync import run_wss_loop
         logger.info("Starting Polymarket WSS real-time sync")
         await run_wss_loop(shutdown)
     except ImportError as e:
-        logger.critical(f"Failed to import WSS module (missing dependencies?): {e}")
-        raise
+        logger.warning(f"WSS module unavailable (missing dependencies?): {e}")
+        logger.info("Falling back to polling mode")
+        await _fallback_to_polling(shutdown)
     except Exception as e:
-        logger.critical(f"WSS Loop failed: {e}")
-        raise
+        logger.error(f"WSS Loop failed: {e}")
+        logger.info("Falling back to polling mode")
+        await _fallback_to_polling(shutdown)
+
+
+async def _fallback_to_polling(shutdown: Shutdown, interval: int = 30) -> None:
+    """
+    Fallback polling loop when WSS is unavailable.
+    """
+    from apps.collector.jobs.polymarket_sync import sync_once as poly_sync_once
+    
+    logger.info(f"Running fallback polling (interval={interval}s)")
+    while not shutdown.is_set:
+        try:
+            await poly_sync_once()
+        except Exception:
+            logger.exception("Error during fallback polling cycle")
+        
+        try:
+            await asyncio.wait_for(shutdown.wait(), timeout=interval)
+            break
+        except asyncio.TimeoutError:
+            continue
 
 
 async def run_polymarket(shutdown: Shutdown, every_seconds: int = 30) -> None:
@@ -285,33 +403,83 @@ async def _amain() -> None:
     # Start additional background tasks
     bg_tasks = []
     if mode != "simulated":
-        bg_tasks.append(asyncio.create_task(run_alerts_loop(shutdown)))
-        bg_tasks.append(asyncio.create_task(run_movers_cache_loop(shutdown)))
-        bg_tasks.append(asyncio.create_task(run_rollups_loop(shutdown)))
-        bg_tasks.append(asyncio.create_task(run_user_alerts_loop(shutdown)))
-        bg_tasks.append(asyncio.create_task(run_volume_spikes_loop(shutdown)))
+        bg_tasks.append(asyncio.create_task(run_alerts_loop(shutdown), name="alerts"))
+        bg_tasks.append(asyncio.create_task(run_movers_cache_loop(shutdown), name="movers_cache"))
+        bg_tasks.append(asyncio.create_task(run_rollups_loop(shutdown), name="rollups"))
+        bg_tasks.append(asyncio.create_task(run_user_alerts_loop(shutdown), name="user_alerts"))
+        bg_tasks.append(asyncio.create_task(run_volume_spikes_loop(shutdown), name="volume_spikes"))
 
+    # Create the main sync task
+    main_task: Optional[asyncio.Task] = None
+    
     try:
         if mode == "simulated":
             logger.info("Mode: simulated")
-            await run_simulated(shutdown, every_seconds=interval)
+            main_task = asyncio.create_task(run_simulated(shutdown, every_seconds=interval), name="main_simulated")
         elif mode == "polymarket":
             logger.info("Mode: polymarket")
-            await run_polymarket(shutdown, every_seconds=interval)
+            main_task = asyncio.create_task(run_polymarket(shutdown, every_seconds=interval), name="main_polymarket")
         else:
             logger.info("Mode: live (all sources)")
-            await run_live(shutdown, every_seconds=interval)
+            main_task = asyncio.create_task(run_live(shutdown, every_seconds=interval), name="main_live")
+        
+        # Wait for either main task completion OR shutdown signal
+        # This ensures background tasks get cancelled even if main task blocks
+        all_tasks = [main_task] + bg_tasks if bg_tasks else [main_task]
+        
+        # Create a shutdown waiter task
+        shutdown_waiter = asyncio.create_task(shutdown.wait(), name="shutdown_waiter")
+        
+        # Wait for first completion: either shutdown signal or main task failure
+        done, pending = await asyncio.wait(
+            [main_task, shutdown_waiter],
+            return_when=asyncio.FIRST_COMPLETED
+        )
+        
+        # If shutdown was triggered, request stop
+        if shutdown_waiter in done:
+            logger.info("Shutdown signal received")
+        elif main_task in done:
+            # Main task completed (likely error) - check for exception
+            try:
+                main_task.result()
+            except Exception as e:
+                logger.error(f"Main task failed: {e}")
             
+    except asyncio.CancelledError:
+        logger.info("Main coroutine cancelled")
     finally:
         logger.info("Shutting down…")
         
-        # Wait for background tasks to finish
-        for task in bg_tasks:
-            try:
+        # Signal shutdown to all tasks
+        shutdown.request()
+        
+        # Cancel all tasks and wait with timeout
+        all_to_cancel = ([main_task] if main_task else []) + bg_tasks
+        
+        for task in all_to_cancel:
+            if task and not task.done():
                 task.cancel()
-                await task
+        
+        # Give tasks a chance to clean up (5 second timeout)
+        if all_to_cancel:
+            try:
+                await asyncio.wait(
+                    [t for t in all_to_cancel if t and not t.done()],
+                    timeout=5.0
+                )
             except Exception:
                 pass
+        
+        # Suppress CancelledError from cancelled tasks
+        for task in all_to_cancel:
+            if task:
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    logger.debug(f"Task {task.get_name()} ended with: {e}")
 
         try:
             db.close()
