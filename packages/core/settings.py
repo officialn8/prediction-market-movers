@@ -64,6 +64,10 @@ class Settings(BaseSettings):
         default=True,
         description="Fall back to REST polling on WSS failure"
     )
+    wss_watchdog_timeout: int = Field(
+        default=120,
+        description="Seconds without messages before forcing reconnect"
+    )
     
     # Streamlit Settings
     streamlit_server_port: int = Field(default=8501)

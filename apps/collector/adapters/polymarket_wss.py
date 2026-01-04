@@ -26,10 +26,24 @@ class PolymarketWebSocket:
         self._metrics = get_wss_metrics()
         self._websocket: Optional[websockets.WebSocketClientProtocol] = None
         self._subscribed_assets: set[str] = set()
+        self._keepalive_task: Optional[asyncio.Task] = None
     
     async def connect(self, asset_ids: list[str]) -> None:
         """Connect and subscribe to MARKET channel."""
         logger.info(f"Connecting to Polymarket WSS: {self.WSS_URL}")
+        
+        # Cancel any existing keepalive task from previous connection
+        if self._keepalive_task and not self._keepalive_task.done():
+            self._keepalive_task.cancel()
+            try:
+                await self._keepalive_task
+            except asyncio.CancelledError:
+                pass
+            self._keepalive_task = None
+        
+        # Clear subscribed assets for fresh subscription
+        self._subscribed_assets.clear()
+        
         try:
             # Polymarket use application-level PING/PONG, so we disable protocol pings
             self._websocket = await websockets.connect(
@@ -40,8 +54,8 @@ class PolymarketWebSocket:
             self._metrics.mode = "wss"
             logger.info("Connected to Polymarket WSS")
             
-            # Start keepalive task
-            asyncio.create_task(self._keepalive())
+            # Start keepalive task and track reference
+            self._keepalive_task = asyncio.create_task(self._keepalive())
             
             if asset_ids:
                 await self.subscribe_assets(asset_ids)
@@ -117,7 +131,8 @@ class PolymarketWebSocket:
     async def listen(self) -> AsyncIterator[PriceUpdate]:
         """Yield parsed messages from WebSocket."""
         if not self._websocket:
-            return
+            logger.error("listen() called but websocket is None - connection lost")
+            raise ConnectionError("WebSocket not connected")
 
         # Track non-JSON messages to avoid log spam
         invalid_op_count = 0
@@ -185,6 +200,19 @@ class PolymarketWebSocket:
             raise
     
     async def close(self):
+        # Cancel keepalive task
+        if self._keepalive_task and not self._keepalive_task.done():
+            self._keepalive_task.cancel()
+            try:
+                await self._keepalive_task
+            except asyncio.CancelledError:
+                pass
+            self._keepalive_task = None
+        
         if self._websocket:
-            await self._websocket.close()
+            try:
+                await self._websocket.close()
+            except Exception:
+                pass  # Ignore close errors
+            self._websocket = None
             self._metrics.mode = "disconnected"

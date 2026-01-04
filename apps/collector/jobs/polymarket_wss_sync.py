@@ -13,6 +13,9 @@ from apps.collector.jobs.movers_cache import check_instant_mover, broadcast_move
 
 logger = logging.getLogger(__name__)
 
+# Health logging interval
+HEALTH_LOG_INTERVAL = 60  # seconds
+
 class Shutdown:
     """Simple shutdown signal carrier"""
     def __init__(self):
@@ -78,15 +81,44 @@ async def run_wss_loop(shutdown: Shutdown) -> None:
     last_batch_flush = time.time()
 
     consecutive_failures = 0
+    
+    # Health logging state
+    last_health_log = time.time()
+    messages_since_last_health = 0
 
     while not shutdown.is_set:
         try:
             await client.connect(asset_ids)
             consecutive_failures = 0
+            
+            # Reset health counters on new connection
+            last_health_log = time.time()
+            messages_since_last_health = 0
+            logger.info(f"WSS connected, starting message loop (watchdog={settings.wss_watchdog_timeout}s)")
 
-            async for update in client.listen():
-                if shutdown.is_set:
+            # Use iterator with timeout for watchdog
+            listen_iter = client.listen().__aiter__()
+            
+            while not shutdown.is_set:
+                try:
+                    # Wait for next message with watchdog timeout
+                    update = await asyncio.wait_for(
+                        listen_iter.__anext__(),
+                        timeout=settings.wss_watchdog_timeout
+                    )
+                except StopAsyncIteration:
+                    # Iterator exhausted (connection closed cleanly)
+                    logger.warning("WSS listen() iterator exhausted")
                     break
+                except asyncio.TimeoutError:
+                    # Watchdog timeout - no messages for too long
+                    logger.error(
+                        f"WSS watchdog timeout: no messages received for {settings.wss_watchdog_timeout}s, forcing reconnect"
+                    )
+                    raise ConnectionError("Watchdog timeout - no messages received")
+
+                # Track message for health stats
+                messages_since_last_health += 1
 
                 # update.token_id is the Polymarket source_token_id (from WSS)
                 source_token_id = update.token_id
@@ -120,6 +152,17 @@ async def run_wss_loop(shutdown: Shutdown) -> None:
 
                     # Update metrics
                     client._metrics.save()
+                
+                # 4. Periodic health logging
+                if now - last_health_log >= HEALTH_LOG_INTERVAL:
+                    elapsed = now - last_health_log
+                    msgs_per_min = (messages_since_last_health / elapsed) * 60 if elapsed > 0 else 0
+                    logger.info(
+                        f"WSS Health: {messages_since_last_health} msgs in {elapsed:.0f}s "
+                        f"({msgs_per_min:.1f}/min), subscriptions={len(asset_ids)}"
+                    )
+                    last_health_log = now
+                    messages_since_last_health = 0
                     
         except Exception as e:
             logger.error(f"WSS Loop Error: {e}")
