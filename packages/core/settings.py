@@ -37,7 +37,6 @@ class Settings(BaseSettings):
     
     # Collector Settings
     sync_interval_seconds: int = Field(default=300, ge=60, le=3600)
-    sync_interval_seconds: int = Field(default=300, ge=60, le=3600)
     log_level: str = Field(default="INFO")
 
     # Polymarket WebSocket Settings
