@@ -73,12 +73,9 @@ class PolymarketWebSocket:
         if not self._websocket:
             raise RuntimeError("WebSocket not connected")
             
-        # Polymarket WSS expects batched subscriptions
-        # Format for CLOB WSS:
-        # {
-        #     "assets_ids": ["..."],
-        #     "type": "MARKET"
-        # }
+        # Polymarket WSS subscription format:
+        # - First subscription establishes channel: {"assets_ids": [...], "type": "market"}
+        # - Additional assets use: {"assets_ids": [...], "operation": "subscribe"}
         
         if not asset_ids:
             return
@@ -89,15 +86,24 @@ class PolymarketWebSocket:
         
         logger.info(f"Subscribing to {len(asset_ids)} assets in {total_chunks} chunks (size={chunk_size})")
         
-        for i in range(0, len(asset_ids), chunk_size):
+        is_first_subscription = len(self._subscribed_assets) == 0
+        
+        for chunk_idx, i in enumerate(range(0, len(asset_ids), chunk_size)):
             chunk = [str(a) for a in asset_ids[i:i + chunk_size]]
-            message = {
-                "assets_ids": chunk,
-                "type": "market"
-            }
             
-            if i == 0:
-                logger.debug(f"Sending first subscription chunk: {json.dumps(message)[:200]}...")
+            if is_first_subscription and chunk_idx == 0:
+                # First subscription establishes the market channel
+                message = {
+                    "assets_ids": chunk,
+                    "type": "market"
+                }
+                logger.debug(f"Sending initial subscription (type=market): {json.dumps(message)[:200]}...")
+            else:
+                # Subsequent subscriptions use operation: subscribe
+                message = {
+                    "assets_ids": chunk,
+                    "operation": "subscribe"
+                }
                 
             await self._websocket.send(json.dumps(message))
             
@@ -113,15 +119,39 @@ class PolymarketWebSocket:
         if not self._websocket:
             return
 
+        # Track non-JSON messages to avoid log spam
+        invalid_op_count = 0
+
         try:
             async for message in self._websocket:
                 # Handle application-level PONG (text message)
                 if isinstance(message, str) and "PONG" in message:
                      logger.debug(f"Received WSS PONG/Control: {message}")
                      continue
+                
+                # Handle known non-JSON responses from Polymarket
+                if isinstance(message, str):
+                    msg_upper = message.strip().upper()
+                    if msg_upper == "INVALID OPERATION":
+                        invalid_op_count += 1
+                        # Only log periodically to avoid spam
+                        if invalid_op_count == 1:
+                            logger.warning("Received 'INVALID OPERATION' from WSS (may indicate subscription format issue)")
+                        elif invalid_op_count % 100 == 0:
+                            logger.warning(f"Received {invalid_op_count} 'INVALID OPERATION' responses from WSS")
+                        continue
+                    elif msg_upper in ("OK", "SUBSCRIBED", "UNSUBSCRIBED"):
+                        # These are acknowledgment messages, safe to ignore
+                        logger.debug(f"WSS acknowledgment: {message}")
+                        continue
                     
                 try:
                     data = json.loads(message)
+                    
+                    # Log summary of invalid ops if we had any and now getting valid data
+                    if invalid_op_count > 0:
+                        logger.info(f"WSS recovered - received {invalid_op_count} 'INVALID OPERATION' responses during subscription")
+                        invalid_op_count = 0
                     
                     # Polymarket WSS returns a list of events
                     # OR a single event (depending on message type, but safe to treat all as potential lists)
@@ -141,7 +171,7 @@ class PolymarketWebSocket:
                         
                 except json.JSONDecodeError:
                     sample = message[:200] if isinstance(message, str) else str(message)[:200]
-                    logger.warning(f"Received invalid JSON from WSS: {sample!r}")
+                    logger.warning(f"Received unexpected non-JSON from WSS: {sample!r}")
                 except Exception as e:
                     logger.error(f"Error parsing WSS message: {e}")
                     
