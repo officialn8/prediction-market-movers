@@ -19,3 +19,4 @@ WHERE volume_24h IS NOT NULL;
 
 COMMIT;
 
+
