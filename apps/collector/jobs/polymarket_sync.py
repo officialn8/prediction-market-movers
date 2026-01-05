@@ -46,6 +46,9 @@ class SyncState:
     # Token map cache: timestamp of last rebuild and validity duration
     last_token_map_rebuild: Optional[float] = None
     token_map_ttl_seconds: int = 300  # Rebuild token map every 5 minutes max
+    # Volume cache: timestamp of last rebuild from DB
+    last_volume_cache_rebuild: Optional[float] = None
+    volume_cache_ttl_seconds: int = 900  # Rebuild volume cache every 15 minutes max
 
 
 # Module-level state
@@ -200,7 +203,7 @@ def sync_markets(adapter: PolymarketAdapter, max_markets: int = MAX_MARKETS) -> 
 
 def sync_prices(adapter: PolymarketAdapter, use_clob: bool = True) -> int:
     """
-    Sync current prices using CLOB API (real-time) or Gamma API (fallback).
+    Sync current prices using CLOB API (real-time) with Gamma fallback for missing tokens.
     
     Args:
         use_clob: If True, try CLOB API first for real-time prices
@@ -211,44 +214,48 @@ def sync_prices(adapter: PolymarketAdapter, use_clob: bool = True) -> int:
     state = get_sync_state()
     
     # Check if token map needs rebuilding (empty or stale)
-    needs_rebuild = (
+    token_map_needs_rebuild = (
         not state.source_to_db_token
         or state.last_token_map_rebuild is None
         or (time.time() - state.last_token_map_rebuild) > state.token_map_ttl_seconds
     )
     
-    if needs_rebuild:
+    if token_map_needs_rebuild:
         _rebuild_token_map()
     
     if not state.source_to_db_token:
         logger.warning("No tokens to sync prices for")
         return 0
     
+    # Check if volume cache needs rebuilding from DB
+    # This ensures CLOB-only syncs have volume context for scoring
+    volume_cache_needs_rebuild = (
+        not state.volume_cache
+        or state.last_volume_cache_rebuild is None
+        or (time.time() - state.last_volume_cache_rebuild) > state.volume_cache_ttl_seconds
+    )
+    
+    if volume_cache_needs_rebuild:
+        _rebuild_volume_cache()
+    
     logger.debug(f"Syncing prices for {len(state.source_to_db_token)} tokens")
     
     start_time = time.time()
     source_token_ids = list(state.source_to_db_token.keys())
+    total_tokens = len(source_token_ids)
     
     snapshots = []
+    missing_token_ids: list[str] = []
     
     if use_clob:
-        # Try CLOB API for real-time prices
-        # Instrumentation: Log sample of tokens we are requesting
+        # Try CLOB API for real-time prices, track missing tokens
         sample_ids = source_token_ids[:3] if source_token_ids else []
-        logger.debug(f"Requesting CLOB prices for {len(source_token_ids)} tokens. Sample: {sample_ids}")
+        logger.debug(f"Requesting CLOB prices for {total_tokens} tokens. Sample: {sample_ids}")
         
-        prices = adapter.fetch_prices_batch(source_token_ids)
+        prices, missing_token_ids = adapter.fetch_prices_batch(
+            source_token_ids, return_missing=True
+        )
         
-        # Instrumentation: Check response count
-        if not prices:
-            logger.warning(
-                f"CLOB returned 0 prices for {len(source_token_ids)} requested tokens. "
-                f"Likely identifier mismatch or API issue. Endpoint: CLOB/prices"
-            )
-        else:
-            if len(prices) < len(source_token_ids) * 0.5:
-                 logger.warning(f"CLOB returned partial prices: {len(prices)}/{len(source_token_ids)}")
-
         if prices:
             for source_token_id, token_price in prices.items():
                 db_token_id = state.source_to_db_token.get(source_token_id)
@@ -261,41 +268,21 @@ def sync_prices(adapter: PolymarketAdapter, use_clob: bool = True) -> int:
                         "volume_24h": state.volume_cache.get(cache_key),
                         "spread": token_price.spread,
                     })
+        
+        # Fallback to Gamma API for missing tokens (if > 10% missing)
+        if missing_token_ids and len(missing_token_ids) > total_tokens * 0.1:
+            logger.info(
+                f"CLOB missing {len(missing_token_ids)}/{total_tokens} tokens, "
+                f"fetching missing from Gamma API"
+            )
+            gamma_snapshots = _fetch_missing_from_gamma(adapter, missing_token_ids, state)
+            snapshots.extend(gamma_snapshots)
+            logger.info(f"Gamma fallback recovered {len(gamma_snapshots)} prices")
     
-    # Fallback to Gamma API if CLOB failed or returned no prices
-    # Logic: If use_clob was True but snapshots is empty, we failed.
-    # If use_clob was False, we intended to fall back.
+    # Full fallback to Gamma API if CLOB returned nothing
     if not snapshots:
-        logger.info("Using Gamma API for prices (fallback or primary)")
-        
-        # Use cached markets if available and recent (10 mins)
-        markets = state.last_gamma_markets
-        is_stale = False
-        if state.last_market_sync:
-            is_stale = (time.time() - state.last_market_sync) > 600  # 10 mins
-            
-        if not markets or is_stale:
-            logger.info("Gamma cache empty or stale, fetching fresh markets")
-            markets = adapter.fetch_all_markets(max_markets=MAX_MARKETS, active=True)
-            state.last_gamma_markets = markets
-            state.last_market_sync = time.time()
-        else:
-            logger.info(f"Using cached Gamma markets ({len(markets)} markets)")
-        
-        if markets:
-            for pm_market in markets:
-                if not pm_market.is_binary:
-                    continue
-                for token_data in pm_market.tokens:
-                    source_token_id = token_data["token_id"]
-                    db_token_id = state.source_to_db_token.get(source_token_id)
-                    if db_token_id:
-                        snapshots.append({
-                            "token_id": db_token_id,
-                            "price": token_data.get("price", 0.5),
-                            "volume_24h": pm_market.volume_24h,
-                            "spread": None,
-                        })
+        logger.info("Using Gamma API for all prices (full fallback)")
+        snapshots = _fetch_all_from_gamma(adapter, state)
     
     # Batch insert
     if snapshots:
@@ -305,6 +292,98 @@ def sync_prices(adapter: PolymarketAdapter, use_clob: bool = True) -> int:
         return inserted
     
     return 0
+
+
+def _fetch_missing_from_gamma(
+    adapter: PolymarketAdapter,
+    missing_token_ids: list[str],
+    state: SyncState,
+) -> list[dict]:
+    """
+    Fetch prices for specific missing tokens from Gamma API.
+    
+    Uses cached markets if available and recent, otherwise fetches fresh.
+    """
+    # Build set of missing token IDs for quick lookup
+    missing_set = set(missing_token_ids)
+    
+    # Use cached markets if available and recent (10 mins)
+    markets = state.last_gamma_markets
+    is_stale = False
+    if state.last_market_sync:
+        is_stale = (time.time() - state.last_market_sync) > 600  # 10 mins
+        
+    if not markets or is_stale:
+        logger.debug("Gamma cache empty or stale, fetching fresh markets for fallback")
+        markets = adapter.fetch_all_markets(max_markets=MAX_MARKETS, active=True)
+        state.last_gamma_markets = markets
+        state.last_market_sync = time.time()
+    
+    snapshots = []
+    if markets:
+        for pm_market in markets:
+            if not pm_market.is_binary:
+                continue
+            for token_data in pm_market.tokens:
+                source_token_id = token_data["token_id"]
+                # Only fetch prices for missing tokens
+                if source_token_id not in missing_set:
+                    continue
+                db_token_id = state.source_to_db_token.get(source_token_id)
+                if db_token_id:
+                    snapshots.append({
+                        "token_id": db_token_id,
+                        "price": token_data.get("price", 0.5),
+                        "volume_24h": pm_market.volume_24h,
+                        "spread": None,
+                    })
+                    # Update volume cache since Gamma provides volume
+                    if pm_market.volume_24h is not None:
+                        cache_key = str(db_token_id)
+                        state.volume_cache[cache_key] = float(pm_market.volume_24h)
+    
+    return snapshots
+
+
+def _fetch_all_from_gamma(adapter: PolymarketAdapter, state: SyncState) -> list[dict]:
+    """
+    Fetch all prices from Gamma API (full fallback).
+    """
+    # Use cached markets if available and recent (10 mins)
+    markets = state.last_gamma_markets
+    is_stale = False
+    if state.last_market_sync:
+        is_stale = (time.time() - state.last_market_sync) > 600  # 10 mins
+        
+    if not markets or is_stale:
+        logger.info("Gamma cache empty or stale, fetching fresh markets")
+        markets = adapter.fetch_all_markets(max_markets=MAX_MARKETS, active=True)
+        state.last_gamma_markets = markets
+        state.last_market_sync = time.time()
+    else:
+        logger.info(f"Using cached Gamma markets ({len(markets)} markets)")
+    
+    snapshots = []
+    if markets:
+        for pm_market in markets:
+            if not pm_market.is_binary:
+                continue
+            for token_data in pm_market.tokens:
+                source_token_id = token_data["token_id"]
+                db_token_id = state.source_to_db_token.get(source_token_id)
+                if db_token_id:
+                    snapshots.append({
+                        "token_id": db_token_id,
+                        "price": token_data.get("price", 0.5),
+                        "volume_24h": pm_market.volume_24h,
+                        "spread": None,
+                    })
+                    # Update volume cache since Gamma provides volume
+                    if pm_market.volume_24h is not None:
+                        cache_key = str(db_token_id)
+                        state.volume_cache[cache_key] = float(pm_market.volume_24h)
+    
+    return snapshots
 
 
 def _rebuild_token_map() -> None:
@@ -346,6 +425,50 @@ def _rebuild_token_map() -> None:
     state.last_token_map_rebuild = time.time()
     
     logger.info(f"Rebuilt token map with {len(state.source_to_db_token)} active tokens")
+
+
+def _rebuild_volume_cache() -> None:
+    """
+    Rebuild the volume cache from database.
+    
+    Queries the latest non-null volume_24h for each active token.
+    This ensures CLOB-only price syncs have volume context for scoring
+    even if no recent Gamma sync has occurred.
+    """
+    state = get_sync_state()
+    
+    db = get_db_pool()
+    
+    # Get latest non-null volume for all active tokens
+    query = """
+        SELECT DISTINCT ON (mt.token_id)
+            mt.token_id,
+            s.volume_24h
+        FROM market_tokens mt
+        JOIN markets m ON mt.market_id = m.market_id
+        JOIN snapshots s ON mt.token_id = s.token_id
+        WHERE m.source = %s
+          AND m.status = 'active'
+          AND s.volume_24h IS NOT NULL
+          AND (m.end_date IS NULL OR m.end_date > NOW())
+        ORDER BY mt.token_id, s.ts DESC
+    """
+    
+    result = db.execute(query, (SOURCE_NAME,), fetch=True)
+    
+    count = 0
+    if result:
+        for row in result:
+            token_id = str(row["token_id"])
+            volume = row["volume_24h"]
+            if volume is not None:
+                state.volume_cache[token_id] = float(volume)
+                count += 1
+    
+    # Record rebuild timestamp for cache TTL
+    state.last_volume_cache_rebuild = time.time()
+    
+    logger.info(f"Rebuilt volume cache with {count} tokens from DB")
 
 
 def should_sync_markets() -> bool:

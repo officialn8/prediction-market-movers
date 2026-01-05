@@ -111,7 +111,7 @@ class TokenWithPrice(BaseModel):
 
 class MarketWithTokens(Market):
     """Market with all its tokens and latest prices."""
-    tokens: list[TokenWithPrice] = []
+    tokens: list[TokenWithPrice] = Field(default_factory=list)
 
 
 class PriceMover(BaseModel):

@@ -385,14 +385,12 @@ class MarketQueries:
         source: Optional[str] = None,
         category: Optional[str] = None,
         direction: str = "both",
-        include_quality_score: bool = False,
     ) -> list[dict]:
         """
         Get top price movers over an arbitrary time window in seconds.
         
-        Now includes composite scoring in SQL for efficient ranking:
-        - score = abs_move * ln(1 + volume)
-        - Ranking and LIMIT applied in SQL to avoid shipping large sets
+        Returns raw metrics only - scoring is done in Python via MoverScorer
+        for consistency across all code paths (cache, alerts, real-time).
         
         Args:
             window_seconds: Time window in seconds
@@ -400,7 +398,6 @@ class MarketQueries:
             source: Optional source filter
             category: Optional category filter  
             direction: 'both', 'gainers', or 'losers'
-            include_quality_score: If True, includes quality_score column for cache updates
         """
         db = get_db_pool()
 
@@ -415,22 +412,10 @@ class MarketQueries:
             order = "pct_change ASC"
         else:
             direction_filter = ""
-            # When include_quality_score, order by composite score instead of raw move
-            order = "quality_score DESC NULLS LAST" if include_quality_score else "ABS(pct_change) DESC"
+            order = "ABS(pct_change) DESC"
         
         # Filter markets ending very soon
         expiry_filter = "AND (m.end_date IS NULL OR m.end_date > NOW() + INTERVAL '24 hours')"
-        
-        # Optional quality score calculation
-        quality_score_col = """
-            -- Composite quality score: abs_move * log1p(volume)
-            -- This matches the Python-side scoring in movers_cache.py
-            CASE 
-                WHEN latest_volume > 0 THEN 
-                    ROUND((ABS(pct_change) * LN(1 + latest_volume))::numeric, 4)
-                ELSE 0 
-            END as quality_score,
-        """ if include_quality_score else ""
 
         query = f"""
             WITH latest AS (
@@ -470,27 +455,23 @@ class MarketQueries:
                 FROM latest l
                 JOIN historical h ON l.token_id = h.token_id
                 LEFT JOIN latest_volume lv ON l.token_id = lv.token_id
-            ),
-            ranked AS (
-                SELECT
-                    c.*,
-                    {quality_score_col}
-                    mt.market_id,
-                    mt.outcome,
-                    m.title,
-                    m.source,
-                    m.category,
-                    m.url
-                FROM changes c
-                JOIN market_tokens mt ON c.token_id = mt.token_id
-                JOIN markets m ON mt.market_id = m.market_id
-                WHERE m.status = 'active'
-                  {source_filter}
-                  {category_filter}
-                  {direction_filter}
-                  {expiry_filter}
             )
-            SELECT * FROM ranked
+            SELECT
+                c.*,
+                mt.market_id,
+                mt.outcome,
+                m.title,
+                m.source,
+                m.category,
+                m.url
+            FROM changes c
+            JOIN market_tokens mt ON c.token_id = mt.token_id
+            JOIN markets m ON mt.market_id = m.market_id
+            WHERE m.status = 'active'
+              {source_filter}
+              {category_filter}
+              {direction_filter}
+              {expiry_filter}
             ORDER BY {order}
             LIMIT %s
         """
@@ -1380,9 +1361,10 @@ class VolumeQueries:
         source: Optional[str] = None,
     ) -> list[dict]:
         """
-        Get top movers enriched with volume spike information.
+        Get movers with volume context for Python-side scoring.
 
-        Combines price movement data with volume analysis for comprehensive view.
+        Returns raw metrics including avg_volume for spike detection.
+        Scoring is done in Python via MoverScorer for consistency.
         """
         db = get_db_pool()
 
@@ -1397,6 +1379,15 @@ class VolumeQueries:
                     price as latest_price,
                     volume_24h as current_volume
                 FROM snapshots
+                ORDER BY token_id, ts DESC
+            ),
+            latest_volume AS (
+                -- Get latest NON-NULL volume (from REST syncs, not WSS which has NULL volume)
+                SELECT DISTINCT ON (token_id)
+                    token_id,
+                    volume_24h as latest_volume
+                FROM snapshots
+                WHERE volume_24h IS NOT NULL
                 ORDER BY token_id, ts DESC
             ),
             historical AS (
@@ -1424,45 +1415,32 @@ class VolumeQueries:
                 ) daily
                 GROUP BY token_id
                 HAVING COUNT(*) >= 2
-            ),
-            changes AS (
-                SELECT
-                    l.token_id,
-                    l.latest_ts,
-                    l.latest_price,
-                    l.current_volume,
-                    h.old_price,
-                    va.avg_volume,
-                    -- Use percentage points (pp) instead of percentage change
-                    -- PP is more meaningful for prediction markets (bounded -100 to +100)
-                    ROUND(((l.latest_price - h.old_price) * 100)::numeric, 2) as pct_change,
-                    CASE
-                        WHEN va.avg_volume > 0 AND l.current_volume IS NOT NULL THEN
-                            ROUND((l.current_volume / va.avg_volume)::numeric, 2)
-                        ELSE NULL
-                    END as volume_spike_ratio
-                FROM latest l
-                JOIN historical h ON l.token_id = h.token_id
-                LEFT JOIN volume_avgs va ON l.token_id = va.token_id
             )
             SELECT
-                c.*,
+                l.token_id,
+                l.latest_ts,
+                l.latest_price,
+                COALESCE(lv.latest_volume, l.current_volume, 0) as latest_volume,
+                h.old_price,
+                va.avg_volume,
+                -- Use percentage points (pp) instead of percentage change
+                ROUND(((l.latest_price - h.old_price) * 100)::numeric, 2) as pct_change,
                 mt.market_id,
                 mt.outcome,
                 m.title,
                 m.source,
                 m.category,
                 m.url
-            FROM changes c
-            JOIN market_tokens mt ON c.token_id = mt.token_id
+            FROM latest l
+            JOIN historical h ON l.token_id = h.token_id
+            LEFT JOIN latest_volume lv ON l.token_id = lv.token_id
+            LEFT JOIN volume_avgs va ON l.token_id = va.token_id
+            JOIN market_tokens mt ON l.token_id = mt.token_id
             JOIN markets m ON mt.market_id = m.market_id
             WHERE m.status = 'active'
               {source_filter}
               {expiry_filter}
-            ORDER BY
-                -- Composite ranking: combine price move with volume spike
-                ABS(c.pct_change) * COALESCE(LN(c.current_volume + 1), 1) *
-                CASE WHEN c.volume_spike_ratio > 1.5 THEN c.volume_spike_ratio ELSE 1 END DESC
+            ORDER BY ABS(ROUND(((l.latest_price - h.old_price) * 100)::numeric, 2)) DESC
             LIMIT %s
         """
 

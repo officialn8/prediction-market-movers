@@ -2,10 +2,13 @@
 Movers Cache Update Job
 
 Precomputes top movers for fast dashboard loading.
-Now uses composite scoring that factors in:
+Uses centralized MoverScorer for composite scoring that factors in:
 - Price movement (percentage points)
 - Volume (liquidity/legitimacy)
 - Volume spikes (unusual activity indicator)
+
+All scoring is done via MoverScorer to ensure consistency between
+cache updates, real-time alerts, and dashboard queries.
 """
 
 import asyncio
@@ -28,12 +31,20 @@ WINDOWS = [300, 900, 3600, 86400]
 # Minimum quality score to be included (filters noise)
 MIN_QUALITY_SCORE = Decimal("1.0")
 
+# Canonical scorer for cache updates - same weights as real-time detection
+_cache_scorer = MoverScorer(
+    weight_move=1.0,
+    weight_volume=1.0,
+    weight_spike=0.5,
+    min_quality_score=MIN_QUALITY_SCORE,
+)
+
 
 async def update_movers_cache() -> None:
     """
     Calculate top movers and update the cache table.
 
-    Uses composite scoring that combines:
+    Uses centralized MoverScorer for composite scoring that combines:
     1. Price movement magnitude
     2. Volume (log-scaled for diminishing returns)
     3. Volume spike bonus (if current volume >> historical avg)
@@ -43,12 +54,10 @@ async def update_movers_cache() -> None:
     """
     logger.info("Running movers cache update...")
 
-    db = get_db_pool()
     now = datetime.now(timezone.utc)
 
     # Pre-fetch volume averages for spike detection
-    # Pre-fetch volume averages for spike detection
-    volume_avg_map = {}
+    volume_avg_map: dict[str, Decimal] = {}
     try:
         volume_avgs = await asyncio.to_thread(VolumeQueries.get_volume_averages)
         for va in volume_avgs:
@@ -61,75 +70,42 @@ async def update_movers_cache() -> None:
 
     for window in WINDOWS:
         try:
-            # Fetch raw movers from the centralized query
-            # Use include_quality_score=True to get SQL-side scoring
-            # Limit to 500 (enough for top 100 after spike bonus adjustment)
+            # Fetch raw movers from query - returns raw metrics only
+            # SQL orders by abs(pct_change) for initial filtering
             raw_movers = await asyncio.to_thread(
                 MarketQueries.get_movers_window,
                 window_seconds=window,
-                limit=500,  # Reduced from 1000 - SQL does initial ranking
+                limit=500,  # Fetch more than needed, scorer will filter
                 direction="both",
-                include_quality_score=True,
             )
 
+            # Use centralized MoverScorer for consistent scoring
+            # This ensures cache scoring matches real-time alert scoring
+            scored_movers = _cache_scorer.rank_movers(
+                movers=raw_movers,
+                price_now_key="latest_price",
+                price_then_key="old_price",
+                volume_key="latest_volume",
+                avg_volume_map=volume_avg_map,
+            )
+
+            # Build cache records from scored movers
             cache_buffer = []
-
-            for row in raw_movers:
-                token_id = row['token_id']
-                token_id_str = str(token_id)
-                price_now = Decimal(str(row['latest_price']))
-                price_then = Decimal(str(row['old_price']))
-                volume = Decimal(str(row.get('latest_volume') or 0))
-
-                # Calculate base metrics
-                move_pp = metrics.calculate_move_pp(price_now, price_then)
-                abs_move_pp = abs(move_pp)
-
-                # Calculate volume spike ratio if we have historical data
-                spike_ratio = None
-                if token_id_str in volume_avg_map:
-                    avg_volume = volume_avg_map[token_id_str]
-                    spike_ratio = metrics.calculate_volume_spike_ratio(volume, avg_volume)
-
-                # Calculate composite score (the new ranking metric)
-                composite_score = metrics.calculate_composite_score(
-                    abs_move_pp=abs_move_pp,
-                    volume=volume,
-                    spike_ratio=spike_ratio,
-                    weight_move=1.0,
-                    weight_volume=1.0,
-                    weight_spike=0.5,  # 50% bonus per spike multiple
-                )
-
-                # Filter noise: Skip if composite score is too low
-                if composite_score < MIN_QUALITY_SCORE:
-                    continue
-
+            for mover in scored_movers[:100]:  # Keep top 100 per window
                 cache_buffer.append({
                     "as_of_ts": now,
                     "window_seconds": window,
-                    "token_id": token_id,
-                    "price_now": price_now,
-                    "price_then": price_then,
-                    "move_pp": move_pp,
-                    "abs_move_pp": abs_move_pp,
-                    "rank": 0,  # Will be set after sorting
-                    "quality_score": composite_score,  # Now stores composite score
+                    "token_id": mover["token_id"],
+                    "price_now": Decimal(str(mover["latest_price"])),
+                    "price_then": Decimal(str(mover["old_price"])),
+                    "move_pp": mover["move_pp"],
+                    "abs_move_pp": mover["abs_move_pp"],
+                    "rank": mover["rank"],
+                    "quality_score": mover["quality_score"],
                     # Persist volume context for dashboard display consistency
-                    "volume_24h": volume,
-                    "spike_ratio": spike_ratio,
+                    "volume_24h": Decimal(str(mover.get("latest_volume") or 0)),
+                    "spike_ratio": mover.get("spike_ratio"),
                 })
-
-            # CRITICAL: Sort by composite score (quality_score) NOT by pct_change
-            # This is the key change that makes volume matter in rankings
-            cache_buffer.sort(key=lambda x: x['quality_score'], reverse=True)
-
-            # Assign ranks after sorting
-            for rank, item in enumerate(cache_buffer, 1):
-                item['rank'] = rank
-
-            # Keep top 100 per window
-            cache_buffer = cache_buffer[:100]
 
             if cache_buffer:
                 await asyncio.to_thread(AnalyticsQueries.insert_movers_batch, cache_buffer)
