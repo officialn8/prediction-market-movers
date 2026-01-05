@@ -312,7 +312,9 @@ class PolymarketAdapter:
             liquidity=liquidity,
         )
     
-    def fetch_prices_batch(self, token_ids: list[str]) -> dict[str, TokenPrice]:
+    def fetch_prices_batch(
+        self, token_ids: list[str], return_missing: bool = False
+    ) -> dict[str, TokenPrice] | tuple[dict[str, TokenPrice], list[str]]:
         """
         Fetch current prices for multiple tokens.
         
@@ -320,12 +322,14 @@ class PolymarketAdapter:
         
         Args:
             token_ids: List of CLOB token IDs
+            return_missing: If True, also return list of token IDs that failed
             
         Returns:
-            Dict mapping token_id -> TokenPrice
+            If return_missing=False: Dict mapping token_id -> TokenPrice
+            If return_missing=True: Tuple of (prices dict, missing token IDs list)
         """
         if not token_ids:
-            return {}
+            return ({}, []) if return_missing else {}
         
         prices = {}
         requested_count = len(token_ids)
@@ -339,12 +343,15 @@ class PolymarketAdapter:
                 prices.update(batch_prices)
         except Exception as e:
             logger.error(f"Error in batch price fetch loop: {e}")
-            # Return partial results if we strictly need to, or just whatever we have.
+            # Continue with partial results
             pass
         
-        # Validation: Check response quality
+        # Track missing tokens
+        returned_ids = set(prices.keys())
+        missing_ids = [tid for tid in token_ids if tid not in returned_ids]
         returned_count = len(prices)
         
+        # Validation: Check response quality and log appropriately
         if returned_count == 0 and requested_count > 0:
             logger.warning(
                 f"CLOB API returned 0 prices for {requested_count} requested tokens. "
@@ -354,23 +361,23 @@ class PolymarketAdapter:
             # Less than 50% response rate
             logger.warning(
                 f"CLOB API partial response: {returned_count}/{requested_count} tokens "
-                f"({returned_count/requested_count*100:.1f}%). Some tokens may have stale prices."
+                f"({returned_count/requested_count*100:.1f}%). {len(missing_ids)} tokens missing."
             )
-            
             # Log sample of missing tokens for debugging (first 5)
-            returned_ids = set(prices.keys())
-            missing_ids = [tid for tid in token_ids if tid not in returned_ids][:5]
             if missing_ids:
-                logger.debug(f"Sample missing token_ids: {missing_ids}")
+                logger.debug(f"Sample missing token_ids: {missing_ids[:5]}")
                 
         elif returned_count < requested_count:
             # Between 50-100% - log at debug level
             logger.debug(
                 f"CLOB API: {returned_count}/{requested_count} tokens returned "
-                f"({(requested_count - returned_count)} missing)"
+                f"({len(missing_ids)} missing)"
             )
         
         logger.info(f"Fetched prices for {returned_count}/{requested_count} tokens")
+        
+        if return_missing:
+            return prices, missing_ids
         return prices
 
     def fetch_price_single(self, token_id: str) -> Optional[TokenPrice]:
