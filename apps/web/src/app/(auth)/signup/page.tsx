@@ -1,11 +1,11 @@
 'use client'
 
-import { useState } from 'react'
+import { Suspense, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import { Mail, Lock, User, ArrowRight, Loader2, Eye, EyeOff, Check, Zap } from 'lucide-react'
 
-export default function SignupPage() {
+function SignupForm() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const plan = searchParams.get('plan') || 'free'
@@ -229,5 +229,21 @@ export default function SignupPage() {
         </p>
       </div>
     </div>
+  )
+}
+
+// Wrap in Suspense for useSearchParams (Next.js 14 requirement)
+export default function SignupPage() {
+  return (
+    <Suspense fallback={
+      <div className="w-full max-w-md">
+        <div className="glass-strong rounded-3xl p-8 border border-white/10 animate-pulse">
+          <div className="h-8 bg-white/10 rounded mb-4" />
+          <div className="h-4 bg-white/10 rounded w-2/3 mx-auto" />
+        </div>
+      </div>
+    }>
+      <SignupForm />
+    </Suspense>
   )
 }
