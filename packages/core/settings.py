@@ -32,8 +32,19 @@ class Settings(BaseSettings):
     
     # API Keys
     polymarket_api_key: Optional[str] = Field(default=None)
-    kalshi_api_key: Optional[str] = Field(default=None)
+    kalshi_api_key: Optional[str] = Field(
+        default=None,
+        description="Kalshi API key ID (for WebSocket auth)"
+    )
     kalshi_api_secret: Optional[str] = Field(default=None)
+    kalshi_private_key_path: Optional[str] = Field(
+        default=None,
+        description="Path to Kalshi RSA private key PEM file (for WebSocket auth)"
+    )
+    kalshi_private_key: Optional[str] = Field(
+        default=None,
+        description="Kalshi RSA private key as PEM string (alternative to path)"
+    )
     
     # Collector Settings
     sync_interval_seconds: int = Field(default=300, ge=60, le=3600)
@@ -67,6 +78,16 @@ class Settings(BaseSettings):
     wss_watchdog_timeout: int = Field(
         default=120,
         description="Seconds without messages before forcing reconnect"
+    )
+    
+    # Kalshi WebSocket Settings
+    kalshi_use_wss: bool = Field(
+        default=False,
+        description="Enable Kalshi WebSocket for real-time updates (requires API key)"
+    )
+    kalshi_wss_enabled: bool = Field(
+        default=False,
+        description="Alias for kalshi_use_wss"
     )
     
     # Streamlit Settings

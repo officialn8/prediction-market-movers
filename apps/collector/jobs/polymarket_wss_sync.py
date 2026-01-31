@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+from collections import defaultdict
 from datetime import datetime
 from uuid import UUID
 
@@ -8,7 +9,14 @@ from packages.core.settings import settings
 from packages.core.storage.db import get_db_pool
 from apps.collector.jobs.polymarket_sync import sync_markets
 from apps.collector.adapters.polymarket_wss import PolymarketWebSocket
-from apps.collector.adapters.wss_messages import PriceUpdate
+from apps.collector.adapters.wss_messages import (
+    PriceUpdate, 
+    TradeEvent, 
+    SpreadUpdate,
+    BookUpdate,
+    MarketResolved,
+    NewMarket,
+)
 from apps.collector.jobs.movers_cache import check_instant_mover, broadcast_mover_alert
 
 logger = logging.getLogger(__name__)
@@ -76,8 +84,11 @@ async def run_wss_loop(shutdown: Shutdown) -> None:
     asset_ids = list(source_to_db_token.keys())
     logger.info(f"Loaded {len(asset_ids)} assets for WSS subscription")
 
-    client = PolymarketWebSocket()
+    # Enable custom features for spread, new markets, and resolution events!
+    client = PolymarketWebSocket(enable_custom_features=True)
     pending_updates: list[PriceUpdate] = []
+    pending_trades: list[TradeEvent] = []  # NEW: Track trades for volume
+    pending_spreads: list[SpreadUpdate] = []  # NEW: Track spreads
     last_batch_flush = time.time()
 
     consecutive_failures = 0
@@ -85,6 +96,9 @@ async def run_wss_loop(shutdown: Shutdown) -> None:
     # Health logging state
     last_health_log = time.time()
     messages_since_last_health = 0
+    
+    # Volume tracking: token_id -> accumulated volume this batch
+    volume_accumulator: dict[str, float] = defaultdict(float)
 
     while not shutdown.is_set:
         try:
@@ -119,35 +133,93 @@ async def run_wss_loop(shutdown: Shutdown) -> None:
 
                 # Track message for health stats
                 messages_since_last_health += 1
+                
+                # Handle different event types from WSS
+                # The 'update' variable is now a union of all event types
+                event = update  # Rename for clarity
+                
+                # ================================================================
+                # PRICE_UPDATE - Best bid/ask price changes
+                # ================================================================
+                if isinstance(event, PriceUpdate):
+                    source_token_id = event.token_id
 
-                # update.token_id is the Polymarket source_token_id (from WSS)
-                source_token_id = update.token_id
+                    # 1. Update local cache for mover detection
+                    if source_token_id in price_map:
+                        old_price = price_map[source_token_id]
+                        # Check for instant mover (use db_token_id for DB operations)
+                        db_token_id = source_to_db_token.get(source_token_id)
+                        if db_token_id:
+                            mover = await check_instant_mover(db_token_id, old_price, event.price)
+                            if mover:
+                                logger.info(f"Instant Mover Detected: {source_token_id} {old_price:.4f} -> {event.price:.4f}")
+                                asyncio.create_task(broadcast_mover_alert(mover))
 
-                # 1. Update local cache for mover detection
-                if source_token_id in price_map:
-                    old_price = price_map[source_token_id]
-                    # Check for instant mover (use db_token_id for DB operations)
-                    db_token_id = source_to_db_token.get(source_token_id)
-                    if db_token_id:
-                        mover = await check_instant_mover(db_token_id, old_price, update.price)
-                        if mover:
-                            logger.info(f"Instant Mover Detected: {source_token_id} {old_price:.4f} -> {update.price:.4f}")
-                            asyncio.create_task(broadcast_mover_alert(mover))
+                    # Update local price map
+                    price_map[source_token_id] = event.price
 
-                # Update local price map
-                price_map[source_token_id] = update.price
-
-                # 2. Add to batch (include db_token_id for flush)
-                pending_updates.append(update)
+                    # 2. Add to batch (include db_token_id for flush)
+                    pending_updates.append(event)
+                
+                # ================================================================
+                # TRADE_EVENT - Individual trades WITH SIZE (for volume!)
+                # This is key for accurate volume calculation!
+                # ================================================================
+                elif isinstance(event, TradeEvent):
+                    source_token_id = event.token_id
+                    
+                    # Accumulate volume from trades
+                    # Volume = size * price (notional value)
+                    trade_volume = event.size * event.price
+                    volume_accumulator[source_token_id] += trade_volume
+                    
+                    # Also update price from trade (more recent than price_change)
+                    if source_token_id in price_map:
+                        price_map[source_token_id] = event.price
+                    
+                    pending_trades.append(event)
+                    logger.debug(f"Trade: {source_token_id} @ {event.price:.4f} x {event.size:.2f}")
+                
+                # ================================================================
+                # SPREAD_UPDATE - Bid/ask spreads (requires custom_feature_enabled)
+                # ================================================================
+                elif isinstance(event, SpreadUpdate):
+                    pending_spreads.append(event)
+                    logger.debug(f"Spread: {event.token_id} bid={event.best_bid:.4f} ask={event.best_ask:.4f}")
+                
+                # ================================================================
+                # MARKET_RESOLVED - Resolution events
+                # ================================================================
+                elif isinstance(event, MarketResolved):
+                    logger.info(f"Market Resolved: {event.market_id} -> {event.outcome}")
+                    # TODO: Mark market as resolved in DB
+                
+                # ================================================================
+                # NEW_MARKET - New market creation
+                # ================================================================
+                elif isinstance(event, NewMarket):
+                    logger.info(f"New Market: {event.market_id} with {len(event.tokens)} tokens")
+                    # TODO: Trigger sync to fetch new market details
 
                 # 3. Check flush conditions
                 now = time.time()
+                
+                total_pending = len(pending_updates) + len(pending_trades) + len(pending_spreads)
 
-                if (len(pending_updates) >= settings.wss_batch_size or
+                if (total_pending >= settings.wss_batch_size or
                     (now - last_batch_flush) >= settings.wss_batch_interval):
 
-                    await flush_price_batch(pending_updates, source_to_db_token)
+                    # Flush price updates with accumulated volume data
+                    await flush_price_batch(
+                        pending_updates, 
+                        source_to_db_token,
+                        volume_accumulator,
+                        pending_spreads,
+                    )
                     pending_updates.clear()
+                    pending_trades.clear()
+                    pending_spreads.clear()
+                    volume_accumulator.clear()
                     last_batch_flush = now
 
                     # Update metrics
@@ -191,16 +263,31 @@ async def run_wss_loop(shutdown: Shutdown) -> None:
         finally:
              await client.close()
 
-async def flush_price_batch(updates: list[PriceUpdate], source_to_db_token: dict[str, str]) -> None:
+async def flush_price_batch(
+    updates: list[PriceUpdate], 
+    source_to_db_token: dict[str, str],
+    volume_accumulator: dict[str, float] = None,
+    spread_updates: list[SpreadUpdate] = None,
+) -> None:
     """
-    Batch insert pending updates to database.
+    Batch insert pending updates to database with volume and spread data.
 
     Args:
         updates: List of PriceUpdate objects (token_id is Polymarket source_token_id)
         source_to_db_token: Mapping of source_token_id -> db_token_id (UUID string)
+        volume_accumulator: Accumulated trade volume by source_token_id
+        spread_updates: Spread updates from best_bid_ask messages
     """
     if not updates:
         return
+    
+    volume_accumulator = volume_accumulator or {}
+    spread_updates = spread_updates or []
+
+    # Build spread lookup: source_token_id -> latest spread
+    spread_map = {}
+    for s in spread_updates:
+        spread_map[s.token_id] = s.spread
 
     # Deduplicate: keep only the LATEST price for each token in this batch
     latest_map = {}
@@ -234,16 +321,30 @@ async def flush_price_batch(updates: list[PriceUpdate], source_to_db_token: dict
     db_token_to_market_id = {str(r["token_id"]): r["id"] for r in rows}
 
     values = []
+    volume_count = 0
+    spread_count = 0
+    
     for u in unique_updates:
-        db_token_id = source_to_db_token.get(u.token_id)
+        source_token_id = u.token_id
+        db_token_id = source_to_db_token.get(source_token_id)
         if db_token_id:
             market_id = db_token_to_market_id.get(db_token_id)
             if market_id:
+                # Get volume from trade accumulator (real-time from trade stream!)
+                volume = volume_accumulator.get(source_token_id)
+                if volume and volume > 0:
+                    volume_count += 1
+                
+                # Get spread from spread updates
+                spread = spread_map.get(source_token_id)
+                if spread is not None:
+                    spread_count += 1
+                
                 values.append((
                     db_token_id,  # token_id (UUID)
                     u.price,
-                    None,  # volume_24h
-                    None,  # spread
+                    volume,  # volume from trade stream!
+                    spread,  # spread from best_bid_ask
                 ))
 
     if values:
@@ -254,4 +355,7 @@ async def flush_price_batch(updates: list[PriceUpdate], source_to_db_token: dict
             for v in values
         ]
         inserted = MarketQueries.insert_snapshots_batch(snapshots)
-        logger.debug(f"Flushed {inserted} price updates to DB")
+        
+        # Log volume/spread stats periodically
+        if volume_count > 0 or spread_count > 0:
+            logger.debug(f"Flushed {inserted} updates (volume: {volume_count}, spreads: {spread_count})")
