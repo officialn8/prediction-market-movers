@@ -393,6 +393,40 @@ async def run_retention_loop(shutdown: Shutdown) -> None:
             logger.exception("Error in retention cleanup loop")
 
 
+async def run_market_stats_loop(shutdown: Shutdown) -> None:
+    """Background loop for calculating market volatility stats (for Z-score normalization)."""
+    from apps.collector.jobs.market_stats import update_market_stats
+
+    # Run 30 min after startup (allow data to accumulate), then every 6 hours
+    logger.info("Market stats loop starting (interval=6h, initial delay=30m)")
+    
+    # Initial delay to let market data accumulate
+    try:
+        await asyncio.wait_for(shutdown.wait(), timeout=1800)  # 30 min
+        return  # Shutdown requested during delay
+    except asyncio.TimeoutError:
+        pass
+    
+    # Initial calculation
+    try:
+        await update_market_stats()
+    except Exception:
+        logger.exception("Error in initial market stats calculation")
+    
+    while not shutdown.is_set:
+        try:
+            # Wait 6 hours before next update
+            await asyncio.wait_for(shutdown.wait(), timeout=21600)
+            break
+        except asyncio.TimeoutError:
+            pass
+        
+        try:
+            await update_market_stats()
+        except Exception:
+            logger.exception("Error in market stats loop")
+
+
 async def _amain() -> None:
     _configure_logging()
     logger.info("Starting collector…")
@@ -436,6 +470,7 @@ async def _amain() -> None:
         bg_tasks.append(asyncio.create_task(run_user_alerts_loop(shutdown), name="user_alerts"))
         bg_tasks.append(asyncio.create_task(run_volume_spikes_loop(shutdown), name="volume_spikes"))
         bg_tasks.append(asyncio.create_task(run_retention_loop(shutdown), name="retention"))
+        bg_tasks.append(asyncio.create_task(run_market_stats_loop(shutdown), name="market_stats"))
 
     # Create the main sync task
     main_task: Optional[asyncio.Task] = None

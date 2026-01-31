@@ -2,61 +2,86 @@
 Movers Cache Update Job
 
 Precomputes top movers for fast dashboard loading.
-Uses centralized MoverScorer for composite scoring that factors in:
-- Price movement (percentage points)
-- Volume (liquidity/legitimacy)
-- Volume spikes (unusual activity indicator)
 
-All scoring is done via MoverScorer to ensure consistency between
-cache updates, real-time alerts, and dashboard queries.
+Supports two scoring modes:
+1. Legacy: MoverScorer (volume-weighted pp moves)
+2. Z-Score: ZScoreMoverScorer (statistically normalized by market volatility)
+
+Z-score mode is preferred when market_stats are available, as it:
+- Normalizes for each market's typical volatility
+- Ranks stable-market moves higher than volatile-market moves
+- Uses log-odds change for proper probability-space scoring
 """
 
 import asyncio
 import logging
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Optional
+from typing import Optional, Dict
 from dataclasses import dataclass
 
 from packages.core.storage.queries import MarketQueries, AnalyticsQueries, VolumeQueries
 from packages.core.storage.db import get_db_pool
 from packages.core.analytics import metrics
-from packages.core.analytics.metrics import MoverScorer
+from packages.core.analytics.metrics import MoverScorer, ZScoreMoverScorer
 
 logger = logging.getLogger(__name__)
 
 # Windows to precompute: 5m, 15m, 1h, 24h
 WINDOWS = [300, 900, 3600, 86400]
+WINDOW_TO_MINUTES = {300: 5, 900: 15, 3600: 60, 86400: 1440}
 
 # Minimum quality score to be included (filters noise)
 MIN_QUALITY_SCORE = Decimal("1.0")
+MIN_Z_SCORE = 1.5  # ~top 7% of statistical outliers
 
-# Canonical scorer for cache updates - same weights as real-time detection
-_cache_scorer = MoverScorer(
+# Enable Z-score mode when stats are available
+USE_ZSCORE_SCORING = True
+
+# Canonical scorers
+_legacy_scorer = MoverScorer(
     weight_move=1.0,
     weight_volume=1.0,
     weight_spike=0.5,
     min_quality_score=MIN_QUALITY_SCORE,
 )
 
+_zscore_scorer = ZScoreMoverScorer(
+    weight_price_z=1.0,
+    weight_volume_z=0.5,
+    weight_velocity=0.3,
+    min_z_score=MIN_Z_SCORE,
+    use_log_odds=True,
+)
+
+
+def _get_market_stats_map() -> Dict[str, Dict]:
+    """Try to load market stats for Z-score scoring."""
+    try:
+        from apps.collector.jobs.market_stats import get_market_stats_map
+        return get_market_stats_map()
+    except Exception as e:
+        logger.debug(f"Could not load market stats: {e}")
+        return {}
+
 
 async def update_movers_cache() -> None:
     """
     Calculate top movers and update the cache table.
 
-    Uses centralized MoverScorer for composite scoring that combines:
-    1. Price movement magnitude
-    2. Volume (log-scaled for diminishing returns)
-    3. Volume spike bonus (if current volume >> historical avg)
+    Scoring modes:
+    1. Z-Score (preferred): Normalizes by market-specific volatility
+       - A 5pp move in a stable market ranks higher than 10pp in volatile one
+       - Uses log-odds for proper probability-space scoring
+    2. Legacy fallback: Volume-weighted pp moves when stats unavailable
 
-    This ensures high-volume, actively-traded markets rank higher
-    than low-volume micro-markets with wild swings.
+    This ensures high-quality, statistically significant moves rank highest.
     """
     logger.info("Running movers cache update...")
 
     now = datetime.now(timezone.utc)
 
-    # Pre-fetch volume averages for spike detection
+    # Pre-fetch volume averages for spike detection (legacy scorer)
     volume_avg_map: dict[str, Decimal] = {}
     try:
         volume_avgs = await asyncio.to_thread(VolumeQueries.get_volume_averages)
@@ -66,52 +91,71 @@ async def update_movers_cache() -> None:
             if token_id and avg_vol:
                 volume_avg_map[token_id] = Decimal(str(avg_vol))
     except Exception as e:
-        logger.warning(f"Could not fetch volume averages (table may not exist yet): {e}")
+        logger.warning(f"Could not fetch volume averages: {e}")
+
+    # Try to load market stats for Z-score mode
+    market_stats_map: Dict[str, Dict] = {}
+    use_zscore = USE_ZSCORE_SCORING
+    if use_zscore:
+        market_stats_map = await asyncio.to_thread(_get_market_stats_map)
+        if not market_stats_map:
+            logger.info("No market stats available, falling back to legacy scoring")
+            use_zscore = False
+        else:
+            logger.info(f"Z-score mode: {len(market_stats_map)} markets with stats")
 
     for window in WINDOWS:
         try:
-            # Fetch raw movers from query - returns raw metrics only
-            # SQL orders by abs(pct_change) for initial filtering
+            # Fetch raw movers from query
             raw_movers = await asyncio.to_thread(
                 MarketQueries.get_movers_window,
                 window_seconds=window,
-                limit=500,  # Fetch more than needed, scorer will filter
+                limit=500,
                 direction="both",
             )
 
-            # Use centralized MoverScorer for consistent scoring
-            # This ensures cache scoring matches real-time alert scoring
-            scored_movers = _cache_scorer.rank_movers(
-                movers=raw_movers,
-                price_now_key="latest_price",
-                price_then_key="old_price",
-                volume_key="latest_volume",
-                avg_volume_map=volume_avg_map,
-            )
+            # Score using appropriate method
+            if use_zscore:
+                scored_movers = _zscore_scorer.rank_movers(
+                    movers=raw_movers,
+                    market_stats_map=market_stats_map,
+                    price_now_key="latest_price",
+                    price_then_key="old_price",
+                    volume_key="latest_volume",
+                    window_minutes=WINDOW_TO_MINUTES.get(window),
+                )
+            else:
+                scored_movers = _legacy_scorer.rank_movers(
+                    movers=raw_movers,
+                    price_now_key="latest_price",
+                    price_then_key="old_price",
+                    volume_key="latest_volume",
+                    avg_volume_map=volume_avg_map,
+                )
 
-            # Build cache records from scored movers
+            # Build cache records
             cache_buffer = []
-            for mover in scored_movers[:100]:  # Keep top 100 per window
+            for mover in scored_movers[:100]:
                 cache_buffer.append({
                     "as_of_ts": now,
                     "window_seconds": window,
                     "token_id": mover["token_id"],
                     "price_now": Decimal(str(mover["latest_price"])),
                     "price_then": Decimal(str(mover["old_price"])),
-                    "move_pp": mover["move_pp"],
-                    "abs_move_pp": mover["abs_move_pp"],
+                    "move_pp": mover.get("move_pp", mover.get("abs_move_pp", Decimal("0"))),
+                    "abs_move_pp": mover.get("abs_move_pp", abs(mover.get("move_pp", Decimal("0")))),
                     "rank": mover["rank"],
                     "quality_score": mover["quality_score"],
-                    # Persist volume context for dashboard display consistency
                     "volume_24h": Decimal(str(mover.get("latest_volume") or 0)),
                     "spike_ratio": mover.get("spike_ratio"),
                 })
 
             if cache_buffer:
                 await asyncio.to_thread(AnalyticsQueries.insert_movers_batch, cache_buffer)
+                score_type = "Z" if use_zscore else "Q"
                 logger.info(
                     f"Updated cache for {window}s window: {len(cache_buffer)} records "
-                    f"(top score: {cache_buffer[0]['quality_score']:.2f})"
+                    f"(top {score_type}-score: {cache_buffer[0]['quality_score']:.2f})"
                 )
 
         except Exception as e:

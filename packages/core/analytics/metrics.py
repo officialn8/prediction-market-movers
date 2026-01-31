@@ -409,3 +409,256 @@ class MoverScorer:
 
 # Default scorer instance for common use
 default_mover_scorer = MoverScorer()
+
+
+# =============================================================================
+# Z-SCORE BASED SCORING - Statistically normalized ranking
+# =============================================================================
+
+def calculate_z_score(value: float, mean: float, stddev: float) -> float:
+    """
+    Calculate Z-score (standard score).
+    
+    Z = (x - μ) / σ
+    
+    Measures how many standard deviations a value is from the mean.
+    """
+    if stddev <= 0:
+        return 0.0
+    return (value - mean) / stddev
+
+
+def calculate_log_odds_change(price_before: float, price_after: float) -> float:
+    """
+    Calculate log-odds change (information-theoretic measure).
+    
+    Log-odds captures the "surprise" of a price move in probability space.
+    A move from 90%→95% is more surprising than 50%→55%.
+    
+    Formula: |ln(p_after/(1-p_after)) - ln(p_before/(1-p_before))|
+    """
+    # Clamp prices to avoid log(0) or division by zero
+    eps = 0.001
+    p1 = max(eps, min(1 - eps, price_before))
+    p2 = max(eps, min(1 - eps, price_after))
+    
+    log_odds_before = math.log(p1 / (1 - p1))
+    log_odds_after = math.log(p2 / (1 - p2))
+    
+    return abs(log_odds_after - log_odds_before)
+
+
+class ZScoreMoverScorer:
+    """
+    Z-Score based scorer for ranking market movers.
+    
+    Advantages over raw percentage point scoring:
+    1. Normalizes for market-specific volatility
+    2. A 5pp move in a stable market ranks higher than 10pp in a volatile one
+    3. Combines price and volume Z-scores for robust anomaly detection
+    4. Optional velocity weighting for time-sensitive detection
+    
+    Based on research from:
+    - Abnormal returns analysis (CAPM)
+    - Statistical anomaly detection
+    - Factor investing methodologies
+    """
+    
+    def __init__(
+        self,
+        weight_price_z: float = 1.0,
+        weight_volume_z: float = 0.5,
+        weight_velocity: float = 0.3,
+        min_z_score: float = 1.5,  # 1.5 std devs = top ~7% of moves
+        use_log_odds: bool = True,  # Use log-odds for price moves
+    ):
+        """
+        Initialize Z-score based scorer.
+        
+        Args:
+            weight_price_z: Weight for price Z-score component
+            weight_volume_z: Weight for volume Z-score component
+            weight_velocity: Weight for velocity bonus (0 to disable)
+            min_z_score: Minimum combined Z-score to be significant
+            use_log_odds: Use log-odds change instead of raw pp
+        """
+        self.weight_price_z = weight_price_z
+        self.weight_volume_z = weight_volume_z
+        self.weight_velocity = weight_velocity
+        self.min_z_score = min_z_score
+        self.use_log_odds = use_log_odds
+    
+    def score(
+        self,
+        price_now: Decimal,
+        price_then: Decimal,
+        volume: Decimal,
+        market_stats: Optional[dict] = None,
+        time_elapsed_minutes: Optional[float] = None,
+    ) -> Tuple[Decimal, dict]:
+        """
+        Calculate Z-score based composite score.
+        
+        Args:
+            price_now: Current price (0-1)
+            price_then: Historical price (0-1)
+            volume: Current 24h volume
+            market_stats: Dict with market-specific stats:
+                - avg_move_pp: Mean absolute move for this market
+                - stddev_move_pp: Std dev of moves
+                - avg_volume: Mean volume
+                - stddev_volume: Std dev of volume
+            time_elapsed_minutes: Time window for velocity calc
+            
+        Returns:
+            Tuple of (composite_z_score, metrics_dict)
+        """
+        price_f = float(price_now)
+        price_old_f = float(price_then)
+        volume_f = float(volume)
+        
+        # Calculate raw move
+        move_pp = (price_f - price_old_f) * 100
+        abs_move_pp = abs(move_pp)
+        
+        # Calculate log-odds change if enabled
+        log_odds_change = 0.0
+        if self.use_log_odds and price_old_f > 0:
+            log_odds_change = calculate_log_odds_change(price_old_f, price_f)
+        
+        # Default stats if not provided (fallback to simple scoring)
+        if market_stats is None:
+            market_stats = {
+                "avg_move_pp": 2.0,  # Assume ~2pp avg move
+                "stddev_move_pp": 3.0,  # ~3pp std dev
+                "avg_volume": 10000.0,
+                "stddev_volume": 20000.0,
+            }
+        
+        # Calculate price Z-score
+        # Use log-odds change if enabled (better for prediction markets)
+        if self.use_log_odds and log_odds_change > 0:
+            # For log-odds, use empirical mean ~0.2, stddev ~0.5
+            price_z = calculate_z_score(
+                log_odds_change,
+                market_stats.get("avg_log_odds", 0.2),
+                market_stats.get("stddev_log_odds", 0.5),
+            )
+        else:
+            price_z = calculate_z_score(
+                abs_move_pp,
+                market_stats.get("avg_move_pp", 2.0),
+                market_stats.get("stddev_move_pp", 3.0),
+            )
+        
+        # Calculate volume Z-score
+        volume_z = 0.0
+        if volume_f > 0:
+            volume_z = calculate_z_score(
+                volume_f,
+                market_stats.get("avg_volume", 10000.0),
+                market_stats.get("stddev_volume", 20000.0),
+            )
+        
+        # Calculate velocity bonus
+        velocity_bonus = 0.0
+        if time_elapsed_minutes and time_elapsed_minutes > 0 and self.weight_velocity > 0:
+            # Velocity = pp/minute, normalized by sqrt(time) to not over-penalize longer windows
+            velocity = abs_move_pp / math.sqrt(time_elapsed_minutes)
+            # Typical velocity might be ~0.5 pp/sqrt(min), 2.0 is fast
+            velocity_z = calculate_z_score(velocity, 0.5, 1.0)
+            velocity_bonus = max(0, velocity_z) * self.weight_velocity
+        
+        # Combine Z-scores
+        # Only positive Z-scores contribute (we want outliers, not underperformers)
+        composite_z = (
+            max(0, price_z) * self.weight_price_z +
+            max(0, volume_z) * self.weight_volume_z +
+            velocity_bonus
+        )
+        
+        # Build metrics dict for transparency
+        metrics = {
+            "move_pp": Decimal(str(move_pp)),
+            "abs_move_pp": Decimal(str(abs_move_pp)),
+            "log_odds_change": log_odds_change,
+            "price_z": price_z,
+            "volume_z": volume_z,
+            "velocity_bonus": velocity_bonus,
+            "composite_z": composite_z,
+        }
+        
+        return Decimal(str(composite_z)), metrics
+    
+    def is_significant(self, z_score: Decimal) -> bool:
+        """Check if Z-score meets minimum threshold."""
+        return float(z_score) >= self.min_z_score
+    
+    def rank_movers(
+        self,
+        movers: list[dict],
+        market_stats_map: Optional[dict] = None,
+        price_now_key: str = "latest_price",
+        price_then_key: str = "old_price",
+        volume_key: str = "latest_volume",
+        window_minutes: Optional[float] = None,
+    ) -> list[dict]:
+        """
+        Score and rank movers using Z-score methodology.
+        
+        Args:
+            movers: List of mover dicts
+            market_stats_map: Map of token_id -> market stats dict
+            price_now_key: Key for current price
+            price_then_key: Key for historical price
+            volume_key: Key for volume
+            window_minutes: Time window for velocity calc
+            
+        Returns:
+            Sorted list with Z-score metrics
+        """
+        scored = []
+        
+        for mover in movers:
+            token_id = str(mover.get("token_id", ""))
+            
+            try:
+                price_now = Decimal(str(mover.get(price_now_key, 0)))
+                price_then = Decimal(str(mover.get(price_then_key, 0)))
+                volume = Decimal(str(mover.get(volume_key, 0) or 0))
+                
+                # Get market-specific stats if available
+                market_stats = None
+                if market_stats_map and token_id in market_stats_map:
+                    market_stats = market_stats_map[token_id]
+                
+                z_score, metrics = self.score(
+                    price_now, price_then, volume,
+                    market_stats=market_stats,
+                    time_elapsed_minutes=window_minutes,
+                )
+                
+                if not self.is_significant(z_score):
+                    continue
+                
+                # Add all metrics to mover
+                mover["z_score"] = z_score
+                mover["quality_score"] = z_score  # Alias for compatibility
+                mover.update(metrics)
+                scored.append(mover)
+                
+            except (ValueError, TypeError):
+                continue
+        
+        # Sort by Z-score descending
+        scored.sort(key=lambda x: float(x["z_score"]), reverse=True)
+        
+        # Assign ranks
+        for rank, mover in enumerate(scored, 1):
+            mover["rank"] = rank
+        
+        return scored
+
+
+# Z-score scorer instance (recommended for production)
+zscore_mover_scorer = ZScoreMoverScorer()
