@@ -254,19 +254,79 @@ async def run_polymarket(shutdown: Shutdown, every_seconds: int = 30) -> None:
 async def run_live(shutdown: Shutdown, every_seconds: int = 30) -> None:
     """
     Run both Polymarket and Kalshi sync.
+    
+    Uses WebSocket for both when available:
+    - Polymarket WSS: Always available (no auth needed)
+    - Kalshi WSS: Requires API key (falls back to REST if not configured)
     """
-    from apps.collector.jobs.polymarket_sync import sync_once as poly_sync_once
-    from apps.collector.jobs.kalshi_sync import sync_once as kalshi_sync_once
-
     logger.info(f"Live sync starting (interval={every_seconds}s)")
     
+    # Check if Kalshi WSS is enabled and configured
+    kalshi_wss_enabled = (
+        settings.kalshi_use_wss and 
+        settings.kalshi_api_key and
+        (settings.kalshi_private_key_path or settings.kalshi_private_key)
+    )
+    
+    if kalshi_wss_enabled:
+        logger.info("Mode: live (Polymarket WSS + Kalshi WSS)")
+        # Run both WSS loops in parallel
+        await asyncio.gather(
+            run_polymarket_wss(shutdown),
+            _run_kalshi_wss(shutdown),
+            return_exceptions=True
+        )
+    elif settings.polymarket_use_wss:
+        logger.info("Mode: live (Polymarket WSS + Kalshi REST)")
+        # Run Polymarket WSS with Kalshi REST polling in background
+        kalshi_task = asyncio.create_task(_run_kalshi_rest(shutdown, every_seconds))
+        try:
+            await run_polymarket_wss(shutdown)
+        finally:
+            kalshi_task.cancel()
+    else:
+        logger.info("Mode: live (REST polling for both)")
+        from apps.collector.jobs.polymarket_sync import sync_once as poly_sync_once
+        from apps.collector.jobs.kalshi_sync import sync_once as kalshi_sync_once
+        
+        while not shutdown.is_set:
+            try:
+                await poly_sync_once()
+                await kalshi_sync_once()
+            except Exception:
+                logger.exception("Error during live sync cycle")
+            await asyncio.sleep(every_seconds)
+
+
+async def _run_kalshi_wss(shutdown: Shutdown) -> None:
+    """Run Kalshi WebSocket sync loop."""
+    try:
+        from apps.collector.jobs.kalshi_wss_sync import run_kalshi_wss_loop
+        await run_kalshi_wss_loop(shutdown)
+    except ImportError as e:
+        logger.warning(f"Kalshi WSS module unavailable: {e}")
+        await _run_kalshi_rest(shutdown)
+    except Exception as e:
+        logger.error(f"Kalshi WSS failed: {e}")
+        await _run_kalshi_rest(shutdown)
+
+
+async def _run_kalshi_rest(shutdown: Shutdown, interval: int = 60) -> None:
+    """Run Kalshi REST polling as fallback."""
+    from apps.collector.jobs.kalshi_sync import sync_once as kalshi_sync_once
+    
+    logger.info(f"Kalshi REST polling (interval={interval}s)")
     while not shutdown.is_set:
         try:
-            await poly_sync_once()
             await kalshi_sync_once()
         except Exception:
-            logger.exception("Error during live sync cycle")
-        await asyncio.sleep(every_seconds)
+            logger.exception("Kalshi REST sync error")
+        
+        try:
+            await asyncio.wait_for(shutdown.wait(), timeout=interval)
+            break
+        except asyncio.TimeoutError:
+            continue
 
 
 async def run_alerts_loop(shutdown: Shutdown) -> None:
