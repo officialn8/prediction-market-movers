@@ -1,14 +1,35 @@
 import type { Metadata } from 'next'
-import { Inter } from 'next/font/google'
+import { DM_Sans, IBM_Plex_Mono } from 'next/font/google'
 import './globals.css'
 import { Providers } from '@/components/providers'
 
-const inter = Inter({ subsets: ['latin'] })
+const dmSans = DM_Sans({ 
+  subsets: ['latin'],
+  variable: '--font-sans',
+  display: 'swap',
+})
+
+const ibmPlexMono = IBM_Plex_Mono({ 
+  subsets: ['latin'],
+  weight: ['400', '500', '600'],
+  variable: '--font-mono',
+  display: 'swap',
+})
 
 export const metadata: Metadata = {
-  title: 'Prediction Market Movers | Real-time Analytics',
-  description: 'Track price movements across Polymarket and Kalshi with real-time alerts and analytics.',
-  keywords: ['prediction markets', 'polymarket', 'kalshi', 'analytics', 'trading'],
+  title: 'PMM | Prediction Market Movers',
+  description: 'Real-time prediction market analytics. Track price movements across Polymarket and Kalshi with instant alerts.',
+  keywords: ['prediction markets', 'polymarket', 'kalshi', 'analytics', 'trading', 'alerts'],
+  openGraph: {
+    title: 'PMM | Prediction Market Movers',
+    description: 'Real-time prediction market analytics. Never miss another move.',
+    type: 'website',
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: 'PMM | Prediction Market Movers',
+    description: 'Real-time prediction market analytics. Never miss another move.',
+  },
 }
 
 export default function RootLayout({
@@ -17,8 +38,12 @@ export default function RootLayout({
   children: React.ReactNode
 }) {
   return (
-    <html lang="en" className="dark">
-      <body className={inter.className}>
+    <html lang="en" className={`dark ${dmSans.variable} ${ibmPlexMono.variable}`}>
+      <head>
+        <link rel="icon" href="/favicon.ico" />
+        <meta name="theme-color" content="#050505" />
+      </head>
+      <body className="font-sans antialiased">
         <Providers>
           {children}
         </Providers>
