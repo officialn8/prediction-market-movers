@@ -13,3 +13,10 @@ name = "dashboard"
 path = "."
 dockerfile = "apps/dashboard/Dockerfile"
 healthcheckPath = "/_stcore/health"
+startCommand = "sh -c 'streamlit run apps/dashboard/app.py --server.port=${PORT:-8501} --server.address=0.0.0.0'"
+
+[[services]]
+name = "collector"
+path = "."
+dockerfile = "apps/collector/Dockerfile"
+startCommand = "python -m apps.collector.main"
