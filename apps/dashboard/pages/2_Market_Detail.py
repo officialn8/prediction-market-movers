@@ -325,12 +325,23 @@ def main():
             """)
         return
     
-    # Show market counts by source
-    poly_count = sum(1 for m in markets if m['source'] == 'polymarket')
-    kalshi_count = sum(1 for m in markets if m['source'] == 'kalshi')
+    # Show market counts by source (always show total counts, not filtered)
+    try:
+        all_markets_count = db.execute("""
+            SELECT source, COUNT(*) as cnt 
+            FROM markets 
+            WHERE status = 'active' 
+            GROUP BY source
+        """, fetch=True)
+        poly_total = sum(m['cnt'] for m in all_markets_count if m['source'] == 'polymarket')
+        kalshi_total = sum(m['cnt'] for m in all_markets_count if m['source'] == 'kalshi')
+    except Exception:
+        poly_total = sum(1 for m in markets if m['source'] == 'polymarket')
+        kalshi_total = sum(1 for m in markets if m['source'] == 'kalshi')
     
     with col2:
-        st.caption(f"📊 {poly_count} Polymarket | {kalshi_count} Kalshi markets loaded")
+        filter_note = f" (showing {source_filter})" if source_filter != "All" else ""
+        st.caption(f"📊 {poly_total} Polymarket | {kalshi_total} Kalshi total{filter_note}")
     
     # Market selector with source indicator
     market_options = {}
@@ -366,28 +377,57 @@ def main():
     # Market header with source badge
     source_badge = get_source_badge(source)
     
-    # Generate proper URL
-    market_url = market.get('url', '')
+    # Generate proper URL - ensure we build from scratch to avoid HTML in URL field
     if is_kalshi and market.get('source_id'):
         # Kalshi URL format
         ticker = market.get('source_id', '')
         series = ticker.split('-')[0].lower() if '-' in ticker else ticker.lower()
         market_url = f"https://kalshi.com/markets/{series}"
+    elif source.lower() == 'polymarket':
+        # Polymarket URL from slug or source_id
+        slug = market.get('slug') or market.get('source_id', '')
+        if slug:
+            # Clean slug - remove any URL prefix if present
+            if 'polymarket.com' in str(slug):
+                slug = slug.split('/')[-1]
+            market_url = f"https://polymarket.com/event/{slug}"
+        else:
+            market_url = ''
+    else:
+        market_url = ''
     
-    url_html = f'<a href="{market_url}" target="_blank" style="color: #5865f2;">View on {source.title()} →</a>' if market_url else ''
+    # Get category - for Kalshi, try to infer from title/ticker
+    category = market.get('category', '')
+    if not category or category.lower() == 'kalshi':
+        if is_kalshi:
+            ticker = market.get('source_id', '').upper()
+            if 'HOUSERACE' in ticker:
+                category = 'Politics'
+            elif 'SENATE' in ticker:
+                category = 'Politics'
+            elif 'PRESIDENT' in ticker:
+                category = 'Politics'
+            elif 'FED' in ticker or 'FOMC' in ticker:
+                category = 'Economics'
+            elif 'BTC' in ticker or 'ETH' in ticker:
+                category = 'Crypto'
+            else:
+                category = 'Politics'  # Default for Kalshi
+        else:
+            category = 'Uncategorized'
     
     st.markdown(f"""
     <div class="market-header">
         <div style="margin-bottom: 0.75rem;">
             {source_badge}
-            <span style="color: #71717a; font-size: 0.85rem;">{market.get('category', 'Uncategorized')}</span>
+            <span style="color: #71717a; font-size: 0.85rem;">{category}</span>
         </div>
         <h2 class="market-title-large">{market['title']}</h2>
         <p style="color: #71717a; margin-bottom: 0.5rem; font-size: 0.85rem;">
             <strong>Status:</strong> {market['status'].upper()}
             {f' | <strong>Ticker:</strong> {market.get("source_id", "N/A")}' if is_kalshi else ''}
         </p>
-        {url_html}
+        {'<a href="' + market_url + '" target="_blank" style="color: #5865f2;">View on ' + source.title() + ' →</a>' if market_url else ''}
     </div>
     """, unsafe_allow_html=True)
     

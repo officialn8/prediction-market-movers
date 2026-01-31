@@ -424,6 +424,18 @@ def get_wss_status() -> dict:
         import time
         status["last_message_age"] = time.time() - metrics.last_message_time
     
+    # Check if DB has recent data (within 5 minutes) even if WSS is "disconnected"
+    db_has_recent_data = False
+    try:
+        db = get_db_pool()
+        result = db.execute("""
+            SELECT COUNT(*) as cnt FROM snapshots 
+            WHERE ts > NOW() - INTERVAL '5 minutes'
+        """, fetch=True)
+        db_has_recent_data = result and result[0]['cnt'] > 0
+    except Exception:
+        pass
+    
     # Determine status class
     if metrics.mode == "wss":
         status["class"] = "connected"
@@ -433,6 +445,11 @@ def get_wss_status() -> dict:
         status["class"] = "polling"
         status["icon"] = "◐"
         status["display_mode"] = "POLLING"
+    elif db_has_recent_data:
+        # Data exists but collector might be between syncs
+        status["class"] = "polling"
+        status["icon"] = "◐"
+        status["display_mode"] = "SYNCING"
     else:
         status["class"] = "disconnected"
         status["icon"] = "○"
