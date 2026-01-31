@@ -114,6 +114,8 @@ def sync_markets(adapter: KalshiAdapter, max_markets: int = MAX_MARKETS) -> int:
             else:
                 # Insert new market
                 market_id = uuid4()
+                # Use category from market (from event), fallback to Politics
+                category = market.category if hasattr(market, 'category') and market.category else "Politics"
                 db.execute("""
                     INSERT INTO markets (
                         market_id, source, source_id, title, category, status, url
@@ -123,7 +125,7 @@ def sync_markets(adapter: KalshiAdapter, max_markets: int = MAX_MARKETS) -> int:
                     SOURCE_NAME,
                     market.ticker,
                     market.title[:500] if market.title else "Unknown",
-                    "kalshi",
+                    category,
                     "active" if market.status == "active" else "closed",
                     market.url,
                 ))

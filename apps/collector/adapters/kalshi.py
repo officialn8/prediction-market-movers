@@ -45,6 +45,7 @@ class KalshiMarket:
     expiration_time: Optional[str]
     result: Optional[str]
     is_parlay: bool = False  # True if market has multiple legs (mve_selected_legs)
+    category: str = ""  # Category from parent event
     
     @property
     def url(self) -> str:
@@ -377,6 +378,23 @@ class KalshiAdapter:
                 break
             
             for event in events:
+                # Get event category (Kalshi uses "category" field)
+                event_category = event.get("category", "")
+                # Map Kalshi categories to our standard ones
+                category_map = {
+                    "Politics": "Politics",
+                    "Economics": "Economics",
+                    "Finance": "Finance",
+                    "Crypto": "Crypto",
+                    "Sports": "Sports",
+                    "Culture": "Culture",
+                    "Science": "Climate & Science",
+                    "Climate": "Climate & Science",
+                    "Tech": "Tech",
+                    "World": "World",
+                }
+                mapped_category = category_map.get(event_category, event_category or "Politics")
+                
                 for m in event.get("markets", []):
                     try:
                         # Check for parlay
@@ -402,6 +420,7 @@ class KalshiAdapter:
                             expiration_time=m.get("expiration_time"),
                             result=m.get("result"),
                             is_parlay=False,
+                            category=mapped_category,
                         )
                         all_markets.append(market)
                     except Exception as e:
