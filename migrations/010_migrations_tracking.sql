@@ -13,3 +13,5 @@ CREATE INDEX IF NOT EXISTS idx_schema_migrations_applied
 ON schema_migrations(applied_at DESC);
 
 
+
+

@@ -366,6 +366,33 @@ async def run_volume_spikes_loop(shutdown: Shutdown) -> None:
             continue
 
 
+async def run_retention_loop(shutdown: Shutdown) -> None:
+    """Background loop for data retention - prunes old snapshots daily."""
+    from apps.collector.jobs.retention import run_retention_cleanup
+
+    # Run once on startup, then daily
+    logger.info("Retention loop starting (interval=24h)")
+    
+    # Initial cleanup on startup
+    try:
+        await run_retention_cleanup()
+    except Exception:
+        logger.exception("Error in initial retention cleanup")
+    
+    while not shutdown.is_set:
+        try:
+            # Wait 24 hours before next cleanup
+            await asyncio.wait_for(shutdown.wait(), timeout=86400)
+            break
+        except asyncio.TimeoutError:
+            pass
+        
+        try:
+            await run_retention_cleanup()
+        except Exception:
+            logger.exception("Error in retention cleanup loop")
+
+
 async def _amain() -> None:
     _configure_logging()
     logger.info("Starting collector…")
@@ -408,6 +435,7 @@ async def _amain() -> None:
         bg_tasks.append(asyncio.create_task(run_rollups_loop(shutdown), name="rollups"))
         bg_tasks.append(asyncio.create_task(run_user_alerts_loop(shutdown), name="user_alerts"))
         bg_tasks.append(asyncio.create_task(run_volume_spikes_loop(shutdown), name="volume_spikes"))
+        bg_tasks.append(asyncio.create_task(run_retention_loop(shutdown), name="retention"))
 
     # Create the main sync task
     main_task: Optional[asyncio.Task] = None

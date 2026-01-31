@@ -14,3 +14,5 @@ CREATE INDEX IF NOT EXISTS idx_system_status_updated ON system_status(updated_at
 COMMENT ON TABLE system_status IS 'Key-value store for system status (WSS metrics, etc.)';
 
 
+
+
