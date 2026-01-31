@@ -2,6 +2,48 @@
 
 Real-time tracking of price movements across Polymarket and Kalshi prediction markets.
 
+> **⚡ Handles 26,000+ WebSocket messages/minute** with automatic fallback to REST polling.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph Sources
+        PM[Polymarket WSS]
+        PMR[Polymarket REST]
+    end
+    
+    subgraph Collector
+        WSS[WSS Adapter]
+        REST[REST Adapter]
+        JOBS[Background Jobs]
+    end
+    
+    subgraph Storage
+        PG[(PostgreSQL)]
+    end
+    
+    subgraph Dashboard
+        ST[Streamlit UI]
+    end
+    
+    PM -->|Real-time| WSS
+    PMR -->|Fallback| REST
+    WSS --> JOBS
+    REST --> JOBS
+    JOBS -->|Snapshots| PG
+    JOBS -->|Movers Cache| PG
+    JOBS -->|Alerts| PG
+    PG --> ST
+```
+
+**Key Features:**
+- 🔌 WebSocket-first with REST fallback
+- 📊 Composite scoring (price move × log volume × spike bonus)
+- ⏱️ OHLC rollups (5m, 1h)
+- 🚨 Volume spike detection
+- 📈 Instant mover alerts (5+ pp moves)
+
 ## 🚀 Quick Start
 
 ### Prerequisites
@@ -41,6 +83,9 @@ Real-time tracking of price movements across Polymarket and Kalshi prediction ma
 | `WSS_WATCHDOG_TIMEOUT` | Seconds without messages before reconnect | `120` |
 | `WSS_RECONNECT_DELAY` | Seconds to wait before reconnecting | `5` |
 | `WSS_MAX_RECONNECT_ATTEMPTS` | Max failures before fallback to polling | `10` |
+| `SNAPSHOT_RETENTION_DAYS` | Days to keep snapshot data | `7` |
+| `DB_POOL_MIN_SIZE` | Minimum DB connections | `2` |
+| `DB_POOL_MAX_SIZE` | Maximum DB connections | `10` |
 | `POLYMARKET_API_KEY` | Polymarket API key (optional) | - |
 | `KALSHI_API_KEY` | Kalshi API key | - |
 | `KALSHI_API_SECRET` | Kalshi API secret | - |
@@ -61,7 +106,8 @@ prediction-market-movers/
 │   │   │   ├── rollups.py              # OHLC aggregation
 │   │   │   ├── alerts.py               # System alerts
 │   │   │   ├── user_alerts.py          # Custom user alerts
-│   │   │   └── volume_spikes.py        # Volume anomaly detection
+│   │   │   ├── volume_spikes.py        # Volume anomaly detection
+│   │   │   └── retention.py            # Data retention (prunes old snapshots)
 │   │   └── adapters/       # API clients
 │   │       ├── polymarket.py           # REST adapter
 │   │       └── polymarket_wss.py       # WebSocket adapter
