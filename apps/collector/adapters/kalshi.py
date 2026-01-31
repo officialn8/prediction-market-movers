@@ -44,6 +44,7 @@ class KalshiMarket:
     close_time: Optional[str]
     expiration_time: Optional[str]
     result: Optional[str]
+    is_parlay: bool = False  # True if market has multiple legs (mve_selected_legs)
     
     @property
     def url(self) -> str:
@@ -170,6 +171,10 @@ class KalshiAdapter:
         markets = []
         for m in data.get("markets", []):
             try:
+                # Check if this is a parlay (multi-leg bet)
+                mve_legs = m.get("mve_selected_legs") or []
+                is_parlay = len(mve_legs) > 0
+                
                 market = KalshiMarket(
                     ticker=m.get("ticker", ""),
                     event_ticker=m.get("event_ticker", ""),
@@ -185,6 +190,7 @@ class KalshiAdapter:
                     close_time=m.get("close_time"),
                     expiration_time=m.get("expiration_time"),
                     result=m.get("result"),
+                    is_parlay=is_parlay,
                 )
                 markets.append(market)
             except Exception as e:
@@ -194,10 +200,33 @@ class KalshiAdapter:
         next_cursor = data.get("cursor")
         return markets, next_cursor
     
+    def _is_parlay(self, market: KalshiMarket) -> bool:
+        """
+        Detect if a market is a parlay (multi-leg bet).
+        
+        Uses the is_parlay flag set from mve_selected_legs during parsing.
+        Also checks ticker/title as fallback for safety.
+        """
+        # Primary check: is_parlay flag from mve_selected_legs
+        if market.is_parlay:
+            return True
+        
+        # Fallback: check ticker for MULTIGAME indicator
+        if "MULTIGAME" in market.ticker.upper():
+            return True
+        
+        # Fallback: check title for parlay pattern (comma-separated yes outcomes)
+        title = market.title.lower()
+        if ",yes " in title or (title.startswith("yes ") and "," in title):
+            return True
+        
+        return False
+    
     def get_all_markets(
         self,
         status: str = "open",
         max_markets: int = 5000,
+        exclude_parlays: bool = True,
     ) -> list[KalshiMarket]:
         """
         Fetch all markets with pagination.
@@ -205,9 +234,11 @@ class KalshiAdapter:
         Args:
             status: Filter by status (open, closed, settled)
             max_markets: Maximum markets to fetch (safety limit)
+            exclude_parlays: Filter out multi-leg parlay bets (default True)
         """
         all_markets = []
         cursor = None
+        parlays_filtered = 0
         
         while len(all_markets) < max_markets:
             markets, cursor = self.get_markets(
@@ -219,12 +250,19 @@ class KalshiAdapter:
             if not markets:
                 break
             
-            all_markets.extend(markets)
+            for m in markets:
+                if exclude_parlays and self._is_parlay(m):
+                    parlays_filtered += 1
+                    continue
+                all_markets.append(m)
+            
             logger.info(f"Fetched {len(all_markets)} Kalshi markets so far...")
             
             if not cursor:
                 break
         
+        if parlays_filtered > 0:
+            logger.info(f"Filtered out {parlays_filtered} parlay markets")
         logger.info(f"Total Kalshi markets fetched: {len(all_markets)}")
         return all_markets
     
@@ -308,6 +346,76 @@ class KalshiAdapter:
         next_cursor = data.get("cursor")
         
         return trades, next_cursor
+    
+    def get_all_events_with_markets(
+        self,
+        status: str = "open",
+        max_events: int = 500,
+    ) -> list[KalshiMarket]:
+        """
+        Fetch all markets by iterating through events.
+        
+        This approach gets real single-outcome prediction markets,
+        avoiding the parlay-heavy default market listing.
+        
+        Returns:
+            List of KalshiMarket objects (non-parlay only)
+        """
+        all_markets = []
+        cursor = None
+        events_processed = 0
+        
+        while events_processed < max_events:
+            events, cursor = self.get_events(
+                limit=100,
+                status=status,
+                with_nested_markets=True,
+                cursor=cursor,
+            )
+            
+            if not events:
+                break
+            
+            for event in events:
+                for m in event.get("markets", []):
+                    try:
+                        # Check for parlay
+                        mve_legs = m.get("mve_selected_legs") or []
+                        is_parlay = len(mve_legs) > 0
+                        
+                        if is_parlay:
+                            continue
+                        
+                        market = KalshiMarket(
+                            ticker=m.get("ticker", ""),
+                            event_ticker=m.get("event_ticker", ""),
+                            title=m.get("title", ""),
+                            subtitle=m.get("subtitle", ""),
+                            status=m.get("status", "unknown"),
+                            yes_bid=m.get("yes_bid", 0) or 0,
+                            yes_ask=m.get("yes_ask", 0) or 0,
+                            last_price=m.get("last_price", 0) or 0,
+                            volume=m.get("volume", 0) or 0,
+                            volume_24h=m.get("volume_24h", 0) or 0,
+                            open_interest=m.get("open_interest", 0) or 0,
+                            close_time=m.get("close_time"),
+                            expiration_time=m.get("expiration_time"),
+                            result=m.get("result"),
+                            is_parlay=False,
+                        )
+                        all_markets.append(market)
+                    except Exception as e:
+                        logger.warning(f"Failed to parse market in event: {e}")
+                        continue
+            
+            events_processed += len(events)
+            logger.info(f"Processed {events_processed} events, {len(all_markets)} markets so far")
+            
+            if not cursor:
+                break
+        
+        logger.info(f"Total Kalshi markets from events: {len(all_markets)}")
+        return all_markets
     
     def close(self) -> None:
         """Close the session."""

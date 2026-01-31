@@ -76,7 +76,8 @@ def sync_markets(adapter: KalshiAdapter, max_markets: int = MAX_MARKETS) -> int:
     logger.info("Starting Kalshi market sync...")
     start_time = time.time()
     
-    markets = adapter.get_all_markets(status="open", max_markets=max_markets)
+    # Use event-based fetching to get real single-outcome markets (not parlays)
+    markets = adapter.get_all_events_with_markets(status="open", max_events=500)
     
     if not markets:
         logger.warning("No markets fetched from Kalshi")
@@ -167,7 +168,8 @@ def sync_prices(adapter: KalshiAdapter, max_markets: int = MAX_MARKETS) -> int:
     if not state.ticker_to_token_id:
         _build_ticker_maps()
     
-    markets = adapter.get_all_markets(status="open", max_markets=max_markets)
+    # Use event-based fetching to get real single-outcome markets (not parlays)
+    markets = adapter.get_all_events_with_markets(status="open", max_events=500)
     
     if not markets:
         return 0
