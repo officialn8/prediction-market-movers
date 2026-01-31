@@ -17,6 +17,7 @@ const ibmPlexMono = IBM_Plex_Mono({
 })
 
 export const metadata: Metadata = {
+  metadataBase: new URL('https://pmm.app'),
   title: 'PMM | Prediction Market Movers',
   description: 'Real-time prediction market analytics. Track price movements across Polymarket and Kalshi with instant alerts.',
   keywords: ['prediction markets', 'polymarket', 'kalshi', 'analytics', 'trading', 'alerts'],
@@ -24,11 +25,13 @@ export const metadata: Metadata = {
     title: 'PMM | Prediction Market Movers',
     description: 'Real-time prediction market analytics. Never miss another move.',
     type: 'website',
+    siteName: 'PMM',
   },
   twitter: {
     card: 'summary_large_image',
     title: 'PMM | Prediction Market Movers',
     description: 'Real-time prediction market analytics. Never miss another move.',
+    creator: '@pmm_app',
   },
 }
 
