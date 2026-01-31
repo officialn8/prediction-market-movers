@@ -1,11 +1,7 @@
 """
 Kalshi sync job - fetches markets and prices, stores in database.
 
-Similar to polymarket_sync but adapted for Kalshi's API structure.
-
-Two main operations:
-1. sync_markets() - Fetch and upsert market metadata
-2. sync_prices() - Fetch and insert price snapshots
+Adapted for the actual PMM schema (markets, market_tokens, snapshots).
 """
 
 from __future__ import annotations
@@ -24,27 +20,23 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 SOURCE_NAME = "kalshi"
-MAX_MARKETS = 2000  # Kalshi has more markets
+MAX_MARKETS = 2000
 MARKET_SYNC_INTERVAL = 15 * 60  # 15 minutes
 
 
 @dataclass
 class KalshiSyncState:
     """Tracks state between sync cycles."""
-    # ticker -> our market_id (UUID)
     ticker_to_market_id: Dict[str, UUID] = field(default_factory=dict)
-    # ticker -> our token_id (UUID) for YES token
     ticker_to_token_id: Dict[str, UUID] = field(default_factory=dict)
     last_market_sync: Optional[float] = None
     markets_count: int = 0
 
 
-# Module-level state
 _sync_state: Optional[KalshiSyncState] = None
 
 
 def get_sync_state() -> KalshiSyncState:
-    """Get or create sync state singleton."""
     global _sync_state
     if _sync_state is None:
         _sync_state = KalshiSyncState()
@@ -56,11 +48,11 @@ def _build_ticker_maps() -> None:
     state = get_sync_state()
     db = get_db_pool()
     
-    # Get all Kalshi markets from DB
+    # Using actual schema: markets.source_id and market_tokens
     rows = db.execute("""
-        SELECT m.market_id, m.source_market_id, t.token_id, t.source_token_id
+        SELECT m.market_id, m.source_id, mt.token_id, mt.symbol
         FROM markets m
-        JOIN tokens t ON t.market_id = m.market_id
+        JOIN market_tokens mt ON mt.market_id = m.market_id
         WHERE m.source = 'kalshi'
     """, fetch=True)
     
@@ -68,7 +60,7 @@ def _build_ticker_maps() -> None:
     state.ticker_to_token_id = {}
     
     for row in (rows or []):
-        ticker = row.get("source_market_id", "")
+        ticker = row.get("source_id", "")
         if ticker:
             state.ticker_to_market_id[ticker] = row["market_id"]
             state.ticker_to_token_id[ticker] = row["token_id"]
@@ -77,18 +69,13 @@ def _build_ticker_maps() -> None:
 
 
 def sync_markets(adapter: KalshiAdapter, max_markets: int = MAX_MARKETS) -> int:
-    """
-    Sync market metadata from Kalshi.
-    
-    Returns number of markets synced.
-    """
+    """Sync market metadata from Kalshi."""
     state = get_sync_state()
     db = get_db_pool()
     
     logger.info("Starting Kalshi market sync...")
     start_time = time.time()
     
-    # Fetch all open markets
     markets = adapter.get_all_markets(status="open", max_markets=max_markets)
     
     if not markets:
@@ -103,27 +90,24 @@ def sync_markets(adapter: KalshiAdapter, max_markets: int = MAX_MARKETS) -> int:
             if market.yes_bid == 0 and market.yes_ask == 0 and market.last_price == 0:
                 continue
             
-            # Check if market exists
+            # Check if market exists (using source_id, not source_market_id)
             existing = db.execute(
-                "SELECT market_id FROM markets WHERE source = 'kalshi' AND source_market_id = %s",
+                "SELECT market_id FROM markets WHERE source = 'kalshi' AND source_id = %s",
                 (market.ticker,),
                 fetch=True
             )
             
             if existing:
-                # Update existing market
                 market_id = existing[0]["market_id"]
                 db.execute("""
                     UPDATE markets SET
                         title = %s,
-                        close_time = %s,
-                        active = %s,
+                        status = %s,
                         updated_at = NOW()
                     WHERE market_id = %s
                 """, (
                     market.title[:500] if market.title else "Unknown",
-                    market.close_time,
-                    market.status == "active",
+                    "active" if market.status == "active" else "closed",
                     market_id,
                 ))
             else:
@@ -131,34 +115,32 @@ def sync_markets(adapter: KalshiAdapter, max_markets: int = MAX_MARKETS) -> int:
                 market_id = uuid4()
                 db.execute("""
                     INSERT INTO markets (
-                        market_id, source, source_market_id, title,
-                        slug, category, close_time, active
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        market_id, source, source_id, title, category, status, url
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """, (
                     market_id,
                     SOURCE_NAME,
                     market.ticker,
                     market.title[:500] if market.title else "Unknown",
-                    market.ticker.lower(),
-                    "kalshi",  # TODO: Extract category from event
-                    market.close_time,
-                    market.status == "active",
+                    "kalshi",
+                    "active" if market.status == "active" else "closed",
+                    market.url,
                 ))
                 
-                # Insert YES token
+                # Insert YES token (using market_tokens table)
                 token_id = uuid4()
                 db.execute("""
-                    INSERT INTO tokens (
-                        token_id, market_id, source_token_id, outcome
-                    ) VALUES (%s, %s, %s, %s)
+                    INSERT INTO market_tokens (
+                        token_id, market_id, outcome, symbol, source_token_id
+                    ) VALUES (%s, %s, %s, %s, %s)
                 """, (
                     token_id,
                     market_id,
-                    market.ticker,  # Use ticker as token ID
                     "YES",
+                    market.ticker,
+                    market.ticker,
                 ))
                 
-                # Update state maps
                 state.ticker_to_market_id[market.ticker] = market_id
                 state.ticker_to_token_id[market.ticker] = token_id
             
@@ -178,19 +160,13 @@ def sync_markets(adapter: KalshiAdapter, max_markets: int = MAX_MARKETS) -> int:
 
 
 def sync_prices(adapter: KalshiAdapter, max_markets: int = MAX_MARKETS) -> int:
-    """
-    Sync price snapshots from Kalshi.
-    
-    Returns number of snapshots inserted.
-    """
+    """Sync price snapshots from Kalshi."""
     state = get_sync_state()
     db = get_db_pool()
     
-    # Rebuild maps if needed
     if not state.ticker_to_token_id:
         _build_ticker_maps()
     
-    # Fetch markets (includes price data)
     markets = adapter.get_all_markets(status="open", max_markets=max_markets)
     
     if not markets:
@@ -201,27 +177,25 @@ def sync_prices(adapter: KalshiAdapter, max_markets: int = MAX_MARKETS) -> int:
     
     for market in markets:
         try:
-            # Get our token_id for this market
             token_id = state.ticker_to_token_id.get(market.ticker)
             
             if not token_id:
-                # Market not in DB yet, skip
                 continue
             
-            # Calculate price (mid or last)
             price = market.mid_price
             if price <= 0 or price >= 1:
-                continue  # Invalid price
+                continue
             
-            # Insert snapshot
+            # Using actual schema: snapshots table with ts column
             db.execute("""
-                INSERT INTO price_snapshots (token_id, price, volume_24h, recorded_at)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO snapshots (ts, token_id, price, volume_24h, spread)
+                VALUES (%s, %s, %s, %s, %s)
             """, (
+                now,
                 token_id,
                 price,
                 float(market.volume_24h) if market.volume_24h else None,
-                now,
+                float(market.spread) if market.spread else None,
             ))
             
             snapshots_inserted += 1
@@ -235,17 +209,11 @@ def sync_prices(adapter: KalshiAdapter, max_markets: int = MAX_MARKETS) -> int:
 
 
 async def sync_once() -> None:
-    """
-    Run one Kalshi sync cycle.
-    
-    - Syncs markets if interval has passed
-    - Always syncs prices
-    """
+    """Run one Kalshi sync cycle."""
     state = get_sync_state()
     adapter = KalshiAdapter()
     
     try:
-        # Check if we need to sync markets
         needs_market_sync = (
             state.last_market_sync is None or
             time.time() - state.last_market_sync > MARKET_SYNC_INTERVAL
@@ -254,7 +222,6 @@ async def sync_once() -> None:
         if needs_market_sync:
             sync_markets(adapter)
         
-        # Always sync prices
         sync_prices(adapter)
         
     except Exception as e:
@@ -264,11 +231,7 @@ async def sync_once() -> None:
 
 
 async def sync_kalshi() -> int:
-    """
-    Full Kalshi sync - markets and prices.
-    
-    Returns number of markets synced.
-    """
+    """Full Kalshi sync - markets and prices."""
     adapter = KalshiAdapter()
     try:
         count = sync_markets(adapter)
@@ -278,7 +241,6 @@ async def sync_kalshi() -> int:
         adapter.close()
 
 
-# Quick test
 if __name__ == "__main__":
     import asyncio
     logging.basicConfig(level=logging.INFO)

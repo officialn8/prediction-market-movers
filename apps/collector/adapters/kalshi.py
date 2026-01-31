@@ -22,7 +22,9 @@ KALSHI_API_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 
 # Rate limiting
 DEFAULT_TIMEOUT = 30
-RATE_LIMIT_DELAY = 0.1  # 100ms between requests
+RATE_LIMIT_DELAY = 0.25  # 250ms between requests (safer for Kalshi)
+MAX_RETRIES = 3
+BACKOFF_BASE = 2.0  # Exponential backoff base (2s, 4s, 8s)
 
 
 @dataclass
@@ -105,23 +107,34 @@ class KalshiAdapter:
         self._last_request_time = time.time()
     
     def _get(self, endpoint: str, params: Optional[dict] = None) -> Any:
-        """Make a GET request with rate limiting and error handling."""
-        self._rate_limit()
+        """Make a GET request with rate limiting, retries, and exponential backoff."""
         url = f"{KALSHI_API_BASE}{endpoint}"
         
-        try:
-            response = self.session.get(url, params=params, timeout=self.timeout)
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.Timeout:
-            logger.error(f"Timeout fetching {url}")
-            raise
-        except requests.exceptions.HTTPError as e:
-            logger.error(f"HTTP error {e.response.status_code} fetching {url}: {e}")
-            raise
-        except Exception as e:
-            logger.error(f"Error fetching {url}: {e}")
-            raise
+        for attempt in range(MAX_RETRIES + 1):
+            self._rate_limit()
+            
+            try:
+                response = self.session.get(url, params=params, timeout=self.timeout)
+                response.raise_for_status()
+                return response.json()
+            except requests.exceptions.Timeout:
+                logger.error(f"Timeout fetching {url}")
+                raise
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 429 and attempt < MAX_RETRIES:
+                    # Rate limited - exponential backoff
+                    wait_time = BACKOFF_BASE ** (attempt + 1)
+                    logger.warning(f"Rate limited (429), waiting {wait_time:.1f}s before retry {attempt + 1}/{MAX_RETRIES}")
+                    time.sleep(wait_time)
+                    continue
+                logger.error(f"HTTP error {e.response.status_code} fetching {url}: {e}")
+                raise
+            except Exception as e:
+                logger.error(f"Error fetching {url}: {e}")
+                raise
+        
+        # Should never reach here, but just in case
+        raise requests.exceptions.HTTPError(f"Max retries exceeded for {url}")
     
     def get_exchange_status(self) -> dict:
         """Check if Kalshi exchange is operational."""
