@@ -28,3 +28,8 @@ pytest-asyncio>=0.21.0
 
 # Frontend Utils
 streamlit-javascript>=0.1.5
+
+# Auth & Billing
+bcrypt>=4.0.0
+PyJWT>=2.8.0
+stripe>=7.0.0
