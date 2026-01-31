@@ -124,8 +124,8 @@ async def list_markets(
 
 @router.get("/movers", response_model=List[MoverResponse])
 async def get_top_movers(
-    window: str = Query(default="1h", regex="^(1h|4h|24h)$"),
-    direction: Optional[str] = Query(default=None, regex="^(up|down)$"),
+    window: str = Query(default="1h", pattern="^(1h|4h|24h)$"),
+    direction: Optional[str] = Query(default=None, pattern="^(up|down)$"),
     limit: int = Query(default=20, le=50),
 ):
     """Get top price movers."""

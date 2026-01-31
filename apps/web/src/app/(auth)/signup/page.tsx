@@ -1,11 +1,11 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, Suspense } from 'react'
 import Link from 'next/link'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { Activity, Mail, Lock, User, Loader2, Check } from 'lucide-react'
 
-export default function SignupPage() {
+function SignupForm() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const plan = searchParams.get('plan') || 'free'
@@ -202,5 +202,13 @@ function Feature({ text }: { text: string }) {
       <Check className="w-4 h-4 text-primary-400" />
       {text}
     </li>
+  )
+}
+
+export default function SignupPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen flex items-center justify-center">Loading...</div>}>
+      <SignupForm />
+    </Suspense>
   )
 }
