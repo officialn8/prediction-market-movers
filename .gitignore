@@ -1,69 +1,59 @@
-# Python
+
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
+.coverage
+.DS_Store
+.eggs/
+.env
+.env.*.local
+.env.local
+.idea/
+.installed.cfg
+.ipynb_checkpoints/
+.nox/
+.pytest_cache/
 .Python
+.tox/
+.venv
+.vscode/
+*.egg
+*.egg-info/
+*.log
+*.node
+*.py[cod]
+*.so
+*.swo
+*.swp
+*~
+*$py.class
+# Docker volumes (local)
+# Environment files
+# IDE
+# Jupyter
+# Logs
+# Next.js build output
+# Node
+# OS
+# Python
+# Testing
+# Virtual environments
+apps/web/.next/
 build/
 develop-eggs/
 dist/
 downloads/
 eggs/
-.eggs/
+env/
+ENV/
+htmlcov/
+kalshi_private.pem
 lib/
 lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# Virtual environments
-.venv
-venv/
-ENV/
-env/
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
-.nox/
-
-# Environment files
-.env
-.env.local
-.env.*.local
-
-# Logs
-*.log
 logs/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Docker volumes (local)
-postgres_data/
-
-# Jupyter
-.ipynb_checkpoints/
-
-
-# Next.js build output
-apps/web/.next/
-.env.local
-
-# Node
 node_modules/
-*.node
+parts/
+postgres_data/
+sdist/
+Thumbs.db
+var/
+venv/
+wheels/

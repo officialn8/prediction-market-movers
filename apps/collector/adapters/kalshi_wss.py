@@ -109,7 +109,8 @@ def generate_kalshi_signature(
     """
     Generate Kalshi API signature for WebSocket authentication.
     
-    Kalshi uses RSA-SHA256 signatures for WebSocket auth.
+    Kalshi uses RSA-PSS with SHA256 (salt length 32) for signatures.
+    Message format: timestamp + method + path
     
     Args:
         api_key: API key ID
@@ -134,12 +135,17 @@ def generate_kalshi_signature(
         )
         
         # Create message to sign: timestamp + method + path
+        # Kalshi requires this exact format
         message = f"{timestamp_ms}{method}{path}"
         
-        # Sign with RSA-SHA256
+        # Sign with RSA-PSS (NOT PKCS1v15!)
+        # Kalshi requires PSS padding with SHA256 and salt length 32
         signature = private_key.sign(
             message.encode(),
-            padding.PKCS1v15(),
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=32  # Kalshi requires salt length 32
+            ),
             hashes.SHA256()
         )
         
@@ -179,7 +185,8 @@ class KalshiWebSocket:
                 print(f"Book: {event.ticker} seq={event.seq}")
     """
     
-    WSS_URL = "wss://trading-api.kalshi.com/trade-api/ws/v2"
+    # Correct URL from kalshi-rs: api.elections.kalshi.com (NOT trading-api.kalshi.com)
+    WSS_URL = "wss://api.elections.kalshi.com/trade-api/ws/v2"
     
     def __init__(
         self,
@@ -249,15 +256,16 @@ class KalshiWebSocket:
             )
             
             # Connect with auth headers
-            headers = {
-                "KALSHI-ACCESS-KEY": self.api_key,
-                "KALSHI-ACCESS-SIGNATURE": signature,
-                "KALSHI-ACCESS-TIMESTAMP": str(timestamp_ms),
-            }
+            # websockets 15.x uses additional_headers instead of extra_headers
+            headers = [
+                ("KALSHI-ACCESS-KEY", self.api_key),
+                ("KALSHI-ACCESS-SIGNATURE", signature),
+                ("KALSHI-ACCESS-TIMESTAMP", str(timestamp_ms)),
+            ]
             
             self._websocket = await websockets.connect(
                 self.WSS_URL,
-                extra_headers=headers,
+                additional_headers=headers,
                 ping_interval=20,
                 ping_timeout=10,
                 close_timeout=5,
