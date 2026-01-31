@@ -58,7 +58,21 @@ export default function DashboardPage() {
   const fetchMovers = async (w: string) => {
     setLoading(true)
     try {
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/markets/movers?window=${w}&limit=20`)
+      const token = localStorage.getItem('token')
+      const headers: HeadersInit = {}
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`
+      }
+      
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/markets/movers?window=${w}&limit=20`, {
+        headers
+      })
+      
+      if (!res.ok) {
+         if (res.status === 401) router.push('/login')
+         throw new Error('Failed to fetch')
+      }
+      
       const data = await res.json()
       setMovers(data)
     } catch (err) {

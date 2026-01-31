@@ -62,6 +62,7 @@ async def list_markets(
     status: str = "active",
     limit: int = Query(default=50, le=100),
     offset: int = 0,
+    current_user: dict = Depends(get_current_user),
 ):
     """List markets with optional filters."""
     db = get_db_pool()
@@ -127,6 +128,7 @@ async def get_top_movers(
     window: str = Query(default="1h", pattern="^(1h|4h|24h)$"),
     direction: Optional[str] = Query(default=None, pattern="^(up|down)$"),
     limit: int = Query(default=20, le=50),
+    current_user: dict = Depends(get_current_user),
 ):
     """Get top price movers."""
     db = get_db_pool()
@@ -187,6 +189,7 @@ async def get_top_movers(
 async def search_markets(
     q: str = Query(..., min_length=2),
     limit: int = Query(default=20, le=50),
+    current_user: dict = Depends(get_current_user),
 ):
     """Search markets by title."""
     db = get_db_pool()
@@ -207,7 +210,10 @@ async def search_markets(
 
 
 @router.get("/{market_id}")
-async def get_market(market_id: str):
+async def get_market(
+    market_id: str,
+    current_user: dict = Depends(get_current_user),
+):
     """Get detailed market info."""
     db = get_db_pool()
     
@@ -268,6 +274,7 @@ async def get_price_history(
     market_id: str,
     outcome: str = "YES",
     hours: int = Query(default=24, le=168),
+    current_user: dict = Depends(get_current_user),
 ):
     """Get price history for a market token."""
     db = get_db_pool()
