@@ -63,3 +63,7 @@ postgres_data/
 # Next.js build output
 apps/web/.next/
 .env.local
+
+# Node
+node_modules/
+*.node
