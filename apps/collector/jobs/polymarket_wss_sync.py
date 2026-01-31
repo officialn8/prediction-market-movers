@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+import json
 from collections import defaultdict
 from datetime import datetime
 from uuid import UUID
@@ -90,6 +91,8 @@ async def run_wss_loop(shutdown: Shutdown) -> None:
     pending_trades: list[TradeEvent] = []  # NEW: Track trades for volume
     pending_spreads: list[SpreadUpdate] = []  # NEW: Track spreads
     last_batch_flush = time.time()
+    last_status_flush = time.time()
+    latest_latency_ms = 0.0
 
     consecutive_failures = 0
     
@@ -200,6 +203,45 @@ async def run_wss_loop(shutdown: Shutdown) -> None:
                 elif isinstance(event, NewMarket):
                     logger.info(f"New Market: {event.market_id} with {len(event.tokens)} tokens")
                     # TODO: Trigger sync to fetch new market details
+
+                # --- NEW: Latency Tracking ---
+                if hasattr(event, "timestamp") and event.timestamp:
+                    try:
+                        # event.timestamp is a naive datetime from wss_messages
+                        # Convert to timestamp to compare with time.time()
+                        msg_ts = event.timestamp.timestamp()
+                        now_ts = time.time()
+                        # Calculate latency in ms
+                        latency = (now_ts - msg_ts) * 1000
+                        # Simple moving average or just latest? Latest is fine for "current status"
+                        # Use a small smoothing to avoid jitter
+                        # But for "Real-time" display, latest is often what people want to see
+                        latest_latency_ms = max(0.0, latency)
+                    except Exception:
+                        latest_latency_ms = 0.0
+                else:
+                    latest_latency_ms = 0.0
+
+                # --- NEW: System Status Update ---
+                # Update DB every 5 seconds to avoid spamming
+                if time.time() - last_status_flush > 5.0:
+                    try:
+                        status_data = {
+                            "connected": True,
+                            "latency_ms": round(latest_latency_ms, 2),
+                            "messages_received": messages_since_last_health, # Since last log, decent proxy
+                            "last_updated": time.time()
+                        }
+                        db_pool.execute("""
+                            INSERT INTO system_status (key, value, updated_at)
+                            VALUES ('polymarket_wss', %s, NOW())
+                            ON CONFLICT (key) DO UPDATE SET
+                                value = EXCLUDED.value,
+                                updated_at = NOW()
+                        """, (json.dumps(status_data),))
+                        last_status_flush = time.time()
+                    except Exception as e:
+                        logger.warning(f"Failed to update system status: {e}")
 
                 # 3. Check flush conditions
                 now = time.time()

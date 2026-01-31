@@ -10,6 +10,7 @@ Reference: apps/collector/adapters/kalshi_wss.py
 import asyncio
 import logging
 import time
+import json
 from datetime import datetime, timezone
 from typing import Dict, Optional
 
@@ -42,8 +43,10 @@ class KalshiWSSSync:
         self.price_cache: Dict[str, float] = {}  # ticker -> last price
         self.volume_accumulator: Dict[str, float] = {}  # ticker -> accumulated volume
         self._last_flush = time.time()
+        self._last_status_update = time.time()
         self._messages_received = 0
         self._trades_received = 0
+        self._latest_latency_ms = 0.0
     
     async def initialize(self) -> bool:
         """
@@ -123,6 +126,17 @@ class KalshiWSSSync:
         """Process a single WSS event."""
         self._messages_received += 1
         
+        # Track latency if timestamp is available
+        # Kalshi events usually have a timestamp attribute
+        if hasattr(event, "timestamp") and event.timestamp:
+            # Timestamp is usually unix timestamp in seconds (float)
+            try:
+                now = time.time()
+                latency = (now - float(event.timestamp)) * 1000
+                self._latest_latency_ms = max(0.0, latency)
+            except (ValueError, TypeError):
+                pass
+        
         if isinstance(event, KalshiTrade):
             await self._handle_trade(event)
         elif isinstance(event, KalshiOrderbookDelta):
@@ -131,6 +145,34 @@ class KalshiWSSSync:
             logger.debug(f"Subscribed to {event.channel}: {len(event.tickers)} tickers")
         elif isinstance(event, KalshiError):
             logger.error(f"Kalshi WSS error: {event.code} - {event.message}")
+            
+        # Update system status periodically (every 5 seconds)
+        if time.time() - self._last_status_update > 5.0:
+            await self._update_system_status()
+
+    async def _update_system_status(self):
+        """Update the system_status table with current metrics."""
+        try:
+            db = get_db_pool()
+            status_data = {
+                "connected": True,
+                "latency_ms": round(self._latest_latency_ms, 2),
+                "messages_received": self._messages_received,
+                "trades_received": self._trades_received,
+                "last_updated": time.time()
+            }
+            
+            db.execute("""
+                INSERT INTO system_status (key, value, updated_at)
+                VALUES ('kalshi_wss', %s, NOW())
+                ON CONFLICT (key) DO UPDATE SET
+                    value = EXCLUDED.value,
+                    updated_at = NOW()
+            """, (json.dumps(status_data),))
+            
+            self._last_status_update = time.time()
+        except Exception as e:
+            logger.warning(f"Failed to update system status: {e}")
     
     async def _handle_trade(self, trade: KalshiTrade) -> None:
         """Handle trade event - update price and accumulate volume."""

@@ -13,7 +13,7 @@ from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
-from apps.api.routers import auth, markets, alerts, users, webhooks
+from apps.api.routers import auth, markets, alerts, users, webhooks, system
 from packages.core.storage import get_db_pool
 
 security = HTTPBearer()
@@ -54,6 +54,7 @@ app.include_router(users.router, prefix="/users", tags=["Users"])
 app.include_router(markets.router, prefix="/markets", tags=["Markets"])
 app.include_router(alerts.router, prefix="/alerts", tags=["Alerts"])
 app.include_router(webhooks.router, prefix="/webhooks", tags=["Webhooks"])
+app.include_router(system.router, prefix="/system", tags=["System"])
 
 
 @app.get("/health")

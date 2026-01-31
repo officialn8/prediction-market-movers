@@ -7,6 +7,7 @@ import {
   LogOut, ChevronRight, Zap, Eye, Flame, Clock, Filter
 } from 'lucide-react'
 import Link from 'next/link'
+import { SystemStatus } from '@/components/ui/SystemStatus'
 
 interface User {
   id: string
@@ -166,6 +167,9 @@ export default function DashboardPage() {
             </div>
             
             <div className="flex items-center gap-4">
+              {/* System Status */}
+              <SystemStatus />
+
               {/* Search */}
               <div className="relative">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
