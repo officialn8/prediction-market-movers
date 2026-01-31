@@ -107,6 +107,7 @@ def calculate_composite_score(
     weight_move: float = 1.0,
     weight_volume: float = 1.0,
     weight_spike: float = 0.5,
+    current_price: Optional[Decimal] = None,
 ) -> Decimal:
     """
     Calculate composite score combining price move, volume, and spike detection.
@@ -115,11 +116,14 @@ def calculate_composite_score(
     1. Large price movements
     2. High volume (liquidity/legitimacy)
     3. Unusual volume activity (something is happening)
+    4. Mid-range prices (moves near 0 or 1 are often noise)
 
     Formula:
-        score = (abs_move * weight_move) * log1p(volume) * weight_volume * spike_bonus
+        score = (abs_move * weight_move) * log1p(volume) * weight_volume * spike_bonus * price_factor
 
-    Where spike_bonus = 1 + (spike_ratio - 1) * weight_spike if spike detected
+    Where:
+        - spike_bonus = 1 + (spike_ratio - 1) * weight_spike if spike detected (capped at 10x)
+        - price_factor = penalty for extreme prices (near 0 or 1)
 
     Args:
         abs_move_pp: Absolute price movement in percentage points
@@ -128,11 +132,19 @@ def calculate_composite_score(
         weight_move: Weight for price movement component
         weight_volume: Weight for volume component
         weight_spike: Weight for spike bonus (0.5 = 50% boost per spike multiple)
+        current_price: Current price (0-1) for boundary penalty
 
     Returns:
         Composite score (higher = more significant)
     """
-    if volume <= 0:
+    # Minimum volume threshold - filter out illiquid noise
+    MIN_VOLUME = Decimal("100")
+    if volume < MIN_VOLUME:
+        return Decimal("0")
+
+    # Minimum move threshold - filter out bid/ask bounce
+    MIN_MOVE_PP = Decimal("0.5")
+    if abs_move_pp < MIN_MOVE_PP:
         return Decimal("0")
 
     # Base quality score
@@ -143,9 +155,21 @@ def calculate_composite_score(
         # Bonus scales with spike ratio
         # e.g., 3x volume -> 1 + (3-1)*0.5 = 2.0x bonus
         spike_bonus = 1.0 + (float(spike_ratio) - 1.0) * weight_spike
-        # Cap the bonus to prevent extreme spikes from dominating
-        spike_bonus = min(spike_bonus, 5.0)
+        # Increased cap to 10x for truly extreme spikes (something big is happening)
+        spike_bonus = min(spike_bonus, 10.0)
         base_score *= spike_bonus
+
+    # Apply price boundary penalty
+    # Prices near 0 or 1 are more susceptible to noise (small $ moves = big pp moves)
+    # Full credit for prices in [0.10, 0.90], linear penalty outside
+    if current_price is not None:
+        price_f = float(current_price)
+        if price_f < 0.05 or price_f > 0.95:
+            # Extreme prices: 50% penalty
+            base_score *= 0.5
+        elif price_f < 0.10 or price_f > 0.90:
+            # Near-extreme: 25% penalty
+            base_score *= 0.75
 
     return Decimal(str(base_score))
 
@@ -303,7 +327,7 @@ class MoverScorer:
         if avg_volume is not None and avg_volume > 0:
             spike_ratio = calculate_volume_spike_ratio(volume, avg_volume)
         
-        # Calculate composite score
+        # Calculate composite score with price boundary awareness
         composite_score = calculate_composite_score(
             abs_move_pp=abs_move_pp,
             volume=volume,
@@ -311,6 +335,7 @@ class MoverScorer:
             weight_move=self.weight_move,
             weight_volume=self.weight_volume,
             weight_spike=self.weight_spike,
+            current_price=price_now,  # Pass for boundary penalty
         )
         
         return composite_score, spike_ratio, move_pp

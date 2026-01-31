@@ -133,29 +133,36 @@ async def get_top_movers(
     
     window_seconds = {"1h": 3600, "4h": 14400, "24h": 86400}[window]
     
+    # Fixed: Join through market_tokens to get market_id, use correct column names
     query = """
+        WITH latest_batch AS (
+            SELECT MAX(as_of_ts) as max_ts
+            FROM movers_cache
+            WHERE window_seconds = %s
+        )
         SELECT 
-            mc.market_id,
+            mt.market_id,
             mc.token_id,
             m.title,
             mt.outcome,
-            mc.current_price,
+            mc.price_now as current_price,
             mc.move_pp as price_change,
             mc.volume_24h,
-            mc.composite_score
+            mc.quality_score as composite_score
         FROM movers_cache mc
-        JOIN markets m ON mc.market_id = m.market_id
+        JOIN latest_batch lb ON mc.as_of_ts = lb.max_ts
         JOIN market_tokens mt ON mc.token_id = mt.token_id
+        JOIN markets m ON mt.market_id = m.market_id
         WHERE mc.window_seconds = %s
     """
-    params = [window_seconds]
+    params = [window_seconds, window_seconds]
     
     if direction == "up":
         query += " AND mc.move_pp > 0"
     elif direction == "down":
         query += " AND mc.move_pp < 0"
     
-    query += " ORDER BY mc.composite_score DESC LIMIT %s"
+    query += " ORDER BY mc.quality_score DESC NULLS LAST LIMIT %s"
     params.append(limit)
     
     results = db.execute(query, tuple(params), fetch=True) or []
@@ -166,10 +173,10 @@ async def get_top_movers(
             token_id=str(r["token_id"]),
             title=r["title"],
             outcome=r["outcome"],
-            current_price=float(r["current_price"]),
-            price_change=float(r["price_change"]),
+            current_price=float(r["current_price"]) if r["current_price"] else 0.0,
+            price_change=float(r["price_change"]) if r["price_change"] else 0.0,
             volume_24h=float(r["volume_24h"]) if r["volume_24h"] else None,
-            composite_score=float(r["composite_score"]),
+            composite_score=float(r["composite_score"]) if r["composite_score"] else 0.0,
             window=window,
         )
         for r in results
