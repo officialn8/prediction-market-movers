@@ -611,6 +611,18 @@ async def _amain() -> None:
 
 
 def main() -> None:
+    # HACK: If Railway Service Name is 'dashboard', hijack this process to run Streamlit.
+    # This fixes a deployment issue where the dashboard service uses the collector Dockerfile/command.
+    service_name = os.getenv("RAILWAY_SERVICE_NAME", "")
+    if service_name == "dashboard":
+        print(f"Service is '{service_name}'! Hijacking execution to run Streamlit...")
+        port = os.getenv("PORT", "8501")
+        # Replace current process with streamlit
+        os.execvp(
+            "streamlit",
+            ["streamlit", "run", "apps/dashboard/app.py", f"--server.port={port}", "--server.address=0.0.0.0"]
+        )
+
     asyncio.run(_amain())
 
 

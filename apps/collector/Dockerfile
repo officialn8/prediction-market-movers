@@ -12,15 +12,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# Copy application code (Monolith)
 COPY packages/ ./packages/
 COPY migrations/ ./migrations/
 COPY apps/collector/ ./apps/collector/
+COPY apps/dashboard/ ./apps/dashboard/
 
 # Set Python path to include packages
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 
-# Run the collector
-CMD ["python", "-m", "apps.collector.main"]
+# Copy entrypoint
+COPY entrypoint.sh .
+RUN chmod +x entrypoint.sh
 
+# Run entrypoint
+CMD ["./entrypoint.sh"]
