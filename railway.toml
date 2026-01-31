@@ -1,0 +1,15 @@
+[common]
+restartPolicyType = "ON_FAILURE"
+
+[[services]]
+name = "api"
+path = "."
+dockerfile = "apps/api/Dockerfile"
+healthcheckPath = "/health"
+startCommand = "sh -c 'uvicorn apps.api.main:app --host 0.0.0.0 --port ${PORT:-8000}'"
+
+[[services]]
+name = "dashboard"
+path = "."
+dockerfile = "apps/dashboard/Dockerfile"
+healthcheckPath = "/_stcore/health"
