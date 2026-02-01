@@ -283,6 +283,7 @@ class MarketQueries:
     ) -> list[dict]:
         """
         Get top price movers over a given time period.
+        Uses WSS trade volumes when available, falls back to Gamma API volumes.
         """
         db = get_db_pool()
 
@@ -299,14 +300,7 @@ class MarketQueries:
             direction_filter = ""
             order = "ABS(pct_change) DESC"
         
-        # New: Filter out markets expiring very soon (or active now but ending)
-        # This removes "convergence" noise (e.g. 2025 markets on 12/31/2025)
-        # We also might want to filter markets that *just* expired but are still marked active?
-        # Let's say we ignore markets where end_date < NOW() + 24 hours
-        # Actually simplest heuristic for "active movers" is probably ignoring markets ending very soon.
-        # Let's filter markets ending in next 48 hours to be safe? Or user said "not include 2025 market movements" on 12/31.
-        # That means markets ending in 2025 should be excluded? Or specifically markets ending *today*?
-        # A conservative filter is: AND (m.end_date IS NULL OR m.end_date > NOW() + INTERVAL '24 hours')
+        # Filter out markets expiring very soon
         expiry_filter = "AND (m.end_date IS NULL OR m.end_date > NOW() + INTERVAL '24 hours')"
 
         query = f"""
@@ -318,14 +312,15 @@ class MarketQueries:
                 FROM snapshots
                 ORDER BY token_id, ts DESC
             ),
-            latest_volume AS (
-                -- Get latest NON-NULL volume (from REST syncs, not WSS which has NULL volume)
-                SELECT DISTINCT ON (token_id)
+            latest_volumes AS (
+                -- Get latest volume with WSS preference
+                SELECT 
                     token_id,
-                    volume_24h as latest_volume
-                FROM snapshots
-                WHERE volume_24h IS NOT NULL
-                ORDER BY token_id, ts DESC
+                    volume_24h as latest_volume,
+                    volume_source,
+                    wss_trade_count
+                FROM v_latest_volumes
+                WHERE has_volume_data = true
             ),
             historical AS (
                 SELECT DISTINCT ON (token_id)
@@ -341,13 +336,15 @@ class MarketQueries:
                     l.latest_ts,
                     l.latest_price,
                     COALESCE(lv.latest_volume, 0) as latest_volume,
+                    lv.volume_source,
+                    lv.wss_trade_count,
                     h.old_price,
                     -- Use percentage points (pp) instead of percentage change
                     -- PP is more meaningful for prediction markets (bounded -100 to +100)
                     ROUND(((l.latest_price - h.old_price) * 100)::numeric, 2) as pct_change
                 FROM latest l
                 JOIN historical h ON l.token_id = h.token_id
-                LEFT JOIN latest_volume lv ON l.token_id = lv.token_id
+                LEFT JOIN latest_volumes lv ON l.token_id = lv.token_id
             )
             SELECT
                 c.*,
@@ -388,6 +385,7 @@ class MarketQueries:
     ) -> list[dict]:
         """
         Get top price movers over an arbitrary time window in seconds.
+        Uses WSS trade volumes when available, falls back to Gamma API.
         
         Returns raw metrics only - scoring is done in Python via MoverScorer
         for consistency across all code paths (cache, alerts, real-time).
@@ -426,14 +424,15 @@ class MarketQueries:
                 FROM snapshots
                 ORDER BY token_id, ts DESC
             ),
-            latest_volume AS (
-                -- Get latest NON-NULL volume (from REST syncs, not WSS which has NULL volume)
-                SELECT DISTINCT ON (token_id)
+            latest_volumes AS (
+                -- Get latest volume with WSS preference
+                SELECT 
                     token_id,
-                    volume_24h as latest_volume
-                FROM snapshots
-                WHERE volume_24h IS NOT NULL
-                ORDER BY token_id, ts DESC
+                    volume_24h as latest_volume,
+                    volume_source,
+                    wss_trade_count
+                FROM v_latest_volumes
+                WHERE has_volume_data = true
             ),
             historical AS (
                 SELECT DISTINCT ON (token_id)
@@ -449,12 +448,14 @@ class MarketQueries:
                     l.latest_ts,
                     l.latest_price,
                     COALESCE(lv.latest_volume, 0) as latest_volume,
+                    lv.volume_source,
+                    lv.wss_trade_count,
                     h.old_price,
                     -- Use percentage points (pp) instead of percentage change
                     ROUND(((l.latest_price - h.old_price) * 100)::numeric, 2) as pct_change
                 FROM latest l
                 JOIN historical h ON l.token_id = h.token_id
-                LEFT JOIN latest_volume lv ON l.token_id = lv.token_id
+                LEFT JOIN latest_volumes lv ON l.token_id = lv.token_id
             )
             SELECT
                 c.*,
@@ -1080,6 +1081,121 @@ class VolumeQueries:
     """
     SQL query methods for volume analysis and spike detection.
     """
+    
+    @staticmethod
+    def accumulate_trade_volume(token_id: UUID, volume: Decimal, trade_ts: Optional[datetime] = None) -> None:
+        """
+        Accumulate trade volume for a token using the stored function.
+        This updates all rolling windows (5m, 15m, 1h, 24h) in trade_volumes table.
+        
+        Args:
+            token_id: The token UUID
+            volume: Trade notional volume (size * price)
+            trade_ts: Optional trade timestamp (defaults to NOW())
+        """
+        db = get_db_pool()
+        query = "SELECT accumulate_trade_volume(%s, %s, %s)"
+        params = (str(token_id), volume, trade_ts or datetime.utcnow())
+        db.execute(query, params)
+    
+    @staticmethod
+    def get_latest_volume(token_id: UUID) -> Optional[dict]:
+        """
+        Get latest volume for a token, preferring WSS trade volumes over Gamma API.
+        
+        Returns:
+            Dict with volume_24h, volume_source, has_volume_data, etc.
+        """
+        db = get_db_pool()
+        query = """
+            SELECT 
+                volume_24h,
+                volume_source,
+                has_volume_data,
+                wss_trade_count,
+                wss_updated_at,
+                gamma_updated_at
+            FROM v_latest_volumes
+            WHERE token_id = %s
+        """
+        result = db.execute(query, (str(token_id),), fetch=True)
+        return result[0] if result else None
+    
+    @staticmethod
+    def get_latest_volumes_for_tokens(token_ids: list[UUID]) -> list[dict]:
+        """
+        Get latest volumes for multiple tokens efficiently.
+        
+        Args:
+            token_ids: List of token UUIDs
+            
+        Returns:
+            List of volume data with WSS preference
+        """
+        if not token_ids:
+            return []
+            
+        db = get_db_pool()
+        placeholders = ','.join(['%s'] * len(token_ids))
+        query = f"""
+            SELECT 
+                token_id,
+                volume_24h,
+                volume_source,
+                has_volume_data,
+                wss_trade_count,
+                wss_updated_at,
+                gamma_updated_at
+            FROM v_latest_volumes
+            WHERE token_id IN ({placeholders})
+        """
+        params = [str(tid) for tid in token_ids]
+        return db.execute(query, tuple(params), fetch=True) or []
+    
+    @staticmethod
+    def get_top_volumes(limit: int = 50, source: Optional[str] = None) -> list[dict]:
+        """
+        Get tokens with highest 24h volume, preferring WSS data.
+        
+        Args:
+            limit: Max results to return
+            source: Optional source filter ('polymarket', 'kalshi')
+            
+        Returns:
+            List of tokens with volume data sorted by volume DESC
+        """
+        db = get_db_pool()
+        
+        source_filter = "AND m.source = %s" if source else ""
+        params = []
+        if source:
+            params.append(source)
+        params.append(limit)
+        
+        query = f"""
+            SELECT 
+                mt.token_id,
+                mt.market_id,
+                mt.outcome,
+                m.title,
+                m.source,
+                m.category,
+                m.url,
+                v.volume_24h,
+                v.volume_source,
+                v.wss_trade_count,
+                v.wss_updated_at,
+                v.gamma_updated_at
+            FROM v_latest_volumes v
+            JOIN market_tokens mt ON v.token_id = mt.token_id
+            JOIN markets m ON mt.market_id = m.market_id
+            WHERE v.has_volume_data = true
+              AND v.volume_24h > 0
+              {source_filter}
+            ORDER BY v.volume_24h DESC
+            LIMIT %s
+        """
+        return db.execute(query, tuple(params), fetch=True) or []
 
     @staticmethod
     def get_volume_averages(token_ids: Optional[list[UUID]] = None) -> list[dict]:

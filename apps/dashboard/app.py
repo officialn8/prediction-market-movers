@@ -605,12 +605,21 @@ def render_mover_card(mover: dict):
     # Generate reason
     direction = "spiked" if pct_change > 0 else "dropped"
     vol_str = format_volume(volume)
-    reason = f"{outcome} {direction} {abs(pct_change):.1f}pp on {vol_str} volume"
+    volume_source = mover.get('volume_source', '')
+    
+    # Add volume source indicator
+    source_indicator = ''
+    if volume_source == 'wss':
+        source_indicator = ' ⚡'  # Lightning bolt for real-time WSS
+    elif volume_source == 'gamma':
+        source_indicator = ' 📊'  # Chart for Gamma API
+    
+    reason = f"{outcome} {direction} {abs(pct_change):.1f}pp on {vol_str} volume{source_indicator}"
     
     # Category tag
     category_html = f'<span class="tag tag-category">{category}</span>' if category else ''
     
-    html_content = f"""<div class="mover-card"><div class="mover-header"><div style="flex: 1;"><div class="mover-tags"><span class="tag tag-source">{source}</span><span class="tag tag-{outcome_class}">{outcome}</span>{category_html}</div><p class="mover-title">{title}</p><p class="mover-price">${old_price:.2f} → ${latest_price:.2f}</p></div><div class="mover-change {change_class}">{change_sign}{pct_change:.1f}pp</div></div><div class="mover-reason">📊 {reason}</div></div>"""
+    html_content = f"""<div class="mover-card"><div class="mover-header"><div style="flex: 1;"><div class="mover-tags"><span class="tag tag-source">{source}</span><span class="tag tag-{outcome_class}">{outcome}</span>{category_html}</div><p class="mover-title">{title}</p><p class="mover-price">${old_price:.2f} → ${latest_price:.2f}</p></div><div class="mover-change {change_class}">{change_sign}{pct_change:.1f}pp</div></div><div class="mover-reason">{reason}</div></div>"""
     
     st.markdown(html_content, unsafe_allow_html=True)
 
@@ -751,6 +760,15 @@ def main():
                 direction="both"
             )
         
+        # Ensure volume data is available for display
+        # The queries now use v_latest_volumes which prefers WSS over Gamma
+        if movers:
+            # Log volume source for debugging
+            wss_count = sum(1 for m in movers if m.get('volume_source') == 'wss')
+            gamma_count = sum(1 for m in movers if m.get('volume_source') == 'gamma')
+            if wss_count > 0 or gamma_count > 0:
+                st.session_state['volume_debug'] = f"WSS: {wss_count}, Gamma: {gamma_count}"
+        
         if not movers:
             st.markdown("""
             <div class="empty-state">
@@ -760,6 +778,14 @@ def main():
             </div>
             """, unsafe_allow_html=True)
             return
+        
+        # Show volume debug info if available
+        if 'volume_debug' in st.session_state and st.session_state['volume_debug']:
+            st.markdown(f"""
+            <div style="font-size: 0.75rem; color: var(--pm-text-muted); margin-bottom: 1rem;">
+                Volume sources: {st.session_state['volume_debug']}
+            </div>
+            """, unsafe_allow_html=True)
         
         # Render mover cards
         for mover in movers:

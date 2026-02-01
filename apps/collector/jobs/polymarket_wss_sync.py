@@ -182,6 +182,18 @@ async def run_wss_loop(shutdown: Shutdown) -> None:
                     
                     pending_trades.append(event)
                     logger.debug(f"Trade: {source_token_id} @ {event.price:.4f} x {event.size:.2f}")
+                    
+                    # Accumulate trade volume in database using stored function
+                    # This provides real-time volume data for the dashboard
+                    db_token_id = source_to_db_token.get(source_token_id)
+                    if db_token_id and trade_volume > 0:
+                        try:
+                            db_pool.execute(
+                                "SELECT accumulate_trade_volume(%s, %s, %s)",
+                                (db_token_id, trade_volume, event.timestamp)
+                            )
+                        except Exception as e:
+                            logger.warning(f"Failed to accumulate trade volume: {e}")
                 
                 # ================================================================
                 # SPREAD_UPDATE - Bid/ask spreads (requires custom_feature_enabled)
