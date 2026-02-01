@@ -377,24 +377,22 @@ def main():
     # Market header with source badge
     source_badge = get_source_badge(source)
     
-    # Generate proper URL - ensure we build from scratch to avoid HTML in URL field
-    if is_kalshi and market.get('source_id'):
-        # Kalshi URL format
-        ticker = market.get('source_id', '')
-        series = ticker.split('-')[0].lower() if '-' in ticker else ticker.lower()
-        market_url = f"https://kalshi.com/markets/{series}"
-    elif source.lower() == 'polymarket':
-        # Polymarket URL from slug or source_id
-        slug = market.get('slug') or market.get('source_id', '')
-        if slug:
-            # Clean slug - remove any URL prefix if present
-            if 'polymarket.com' in str(slug):
-                slug = slug.split('/')[-1]
-            market_url = f"https://polymarket.com/event/{slug}"
-        else:
-            market_url = ''
-    else:
-        market_url = ''
+    # Generate proper URL - prefer stored URL from ingestion
+    market_url = market.get("url") or ""
+    if not market_url:
+        if is_kalshi and market.get('source_id'):
+            # Kalshi URL format
+            ticker = market.get('source_id', '')
+            series = ticker.split('-')[0].lower() if '-' in ticker else ticker.lower()
+            market_url = f"https://kalshi.com/markets/{series}"
+        elif source.lower() == 'polymarket':
+            # Polymarket URL from slug or source_id (fallback)
+            slug = market.get('slug') or market.get('source_id', '')
+            if slug:
+                # Clean slug - remove any URL prefix if present
+                if 'polymarket.com' in str(slug):
+                    slug = slug.split('/')[-1]
+                market_url = f"https://polymarket.com/event/{slug}"
     
     # Get category - for Kalshi, try to infer from title/ticker
     category = market.get('category', '')

@@ -35,6 +35,7 @@ class PolymarketMarket:
     question_id: str
     title: str
     slug: str
+    event_url: Optional[str]
     category: Optional[str]
     end_date: Optional[str]
     active: bool
@@ -45,6 +46,8 @@ class PolymarketMarket:
 
     @property
     def url(self) -> str:
+        if self.event_url:
+            return self.event_url
         return f"https://polymarket.com/event/{self.slug}"
 
     @property
@@ -249,6 +252,26 @@ class PolymarketAdapter:
         question = data.get("question") or data.get("title") or "Unknown"
         question_id = data.get("question_id") or data.get("questionId") or condition_id
         slug = data.get("slug") or data.get("market_slug") or condition_id
+
+        # Prefer event-level URL/slug for canonical linking
+        event = data.get("event") or {}
+        event_url = data.get("event_url") or data.get("eventUrl") or event.get("url")
+        event_slug = data.get("event_slug") or data.get("eventSlug") or event.get("slug")
+
+        if event_url:
+            if event_url.startswith("/"):
+                event_url = f"https://polymarket.com{event_url}"
+            elif not event_url.startswith("http"):
+                event_url = f"https://polymarket.com/{event_url.lstrip('/')}"
+        elif event_slug:
+            event_url = f"https://polymarket.com/event/{event_slug}"
+        else:
+            raw_url = data.get("url")
+            if raw_url:
+                if raw_url.startswith("/"):
+                    event_url = f"https://polymarket.com{raw_url}"
+                elif raw_url.startswith("http"):
+                    event_url = raw_url
         
         # Category/tags
         category = None
@@ -303,6 +326,7 @@ class PolymarketAdapter:
             question_id=question_id,
             title=question,
             slug=slug,
+            event_url=event_url,
             category=category,
             end_date=data.get("end_date_iso") or data.get("endDate"),
             active=data.get("active", True),
@@ -505,6 +529,8 @@ class PolymarketAdapter:
                 # Process events
                 for event in data:
                     event_category = event.get("category")
+                    event_url = event.get("url")
+                    event_slug = event.get("slug")
                     
                     # Each event has a 'markets' list
                     event_markets = event.get("markets", [])
@@ -516,6 +542,12 @@ class PolymarketAdapter:
                         # Add event tags to market tags if missing
                         if "tags" not in m_data and "tags" in event:
                              m_data["tags"] = event["tags"]
+
+                        # Preserve event URL/slug for canonical linking
+                        if event_url and "event_url" not in m_data:
+                            m_data["event_url"] = event_url
+                        if event_slug and "event_slug" not in m_data:
+                            m_data["event_slug"] = event_slug
                              
                         # Parse
                         pm_market = self._parse_market(m_data)
