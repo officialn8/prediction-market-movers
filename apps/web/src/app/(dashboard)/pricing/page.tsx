@@ -1,7 +1,9 @@
 'use client'
 
 import { useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { Check, Zap, Crown, Building2 } from 'lucide-react'
+import { useSession, checkout, openCustomerPortal } from '@/lib/auth-client'
 
 const tiers = [
   {
@@ -58,6 +60,8 @@ const tiers = [
 ]
 
 export default function PricingPage() {
+  const router = useRouter()
+  const { data: session, isPending } = useSession()
   const [loading, setLoading] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
@@ -66,34 +70,27 @@ export default function PricingPage() {
     setError(null)
 
     try {
-      // Get auth token from localStorage (set during login)
-      const token = localStorage.getItem('token')
-      if (!token) {
-        window.location.href = '/login?redirect=/pricing'
+      // Check if user is logged in
+      if (!session?.user) {
+        router.push(`/signup?plan=${tier}`)
         return
       }
-      
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/webhooks/create-checkout`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`,
-        },
-        body: JSON.stringify({ tier }),
-      })
 
-      if (!res.ok) {
-        throw new Error('Failed to create checkout session')
-      }
-
-      const data = await res.json()
-      
-      // Redirect to Polar Checkout
-      window.location.href = data.checkout_url
+      // Use BetterAuth's Polar checkout
+      const slug = tier === 'pro' ? 'pmm-pro' : 'pmm-enterprise'
+      await checkout({ products: [slug] })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong')
     } finally {
       setLoading(null)
+    }
+  }
+
+  const handleManageSubscription = async () => {
+    try {
+      await openCustomerPortal()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to open portal')
     }
   }
 

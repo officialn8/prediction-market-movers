@@ -57,3 +57,4 @@ Thumbs.db
 var/
 venv/
 wheels/
+!apps/web/src/lib/
