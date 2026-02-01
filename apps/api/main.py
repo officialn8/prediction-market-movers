@@ -9,14 +9,20 @@ FastAPI backend for SaaS platform:
 """
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from apps.api.routers import auth, markets, alerts, users, webhooks, system
 from packages.core.storage import get_db_pool
 
 security = HTTPBearer()
+
+# Rate limiter - uses client IP by default
+limiter = Limiter(key_func=get_remote_address)
 
 
 @asynccontextmanager
@@ -34,6 +40,10 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+# Add rate limiter to app state and exception handler
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # CORS for frontend
 app.add_middleware(

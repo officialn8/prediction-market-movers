@@ -294,12 +294,12 @@ async def get_price_history(
     
     token_id = token[0]["token_id"]
     
-    # Get price history
+    # Get price history (using make_interval to avoid SQL injection)
     history = db.execute(
         """
         SELECT ts as timestamp, price, volume_24h as volume
         FROM snapshots
-        WHERE token_id = %s AND ts > NOW() - INTERVAL '%s hours'
+        WHERE token_id = %s AND ts > NOW() - make_interval(hours => %s)
         ORDER BY ts ASC
         """,
         (str(token_id), hours),

@@ -17,7 +17,7 @@ from packages.core.storage import get_db_pool
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-POLAR_WEBHOOK_SECRET = os.getenv("POLAR_WEBHOOK_SECRET", "")
+POLAR_WEBHOOK_SECRET = os.getenv("POLAR_WEBHOOK_SECRET")  # None if not set
 POLAR_ACCESS_TOKEN = os.getenv("POLAR_ACCESS_TOKEN", "")
 
 # Product IDs from Polar dashboard
@@ -33,6 +33,10 @@ POLAR_PRODUCTS = {
 
 @router.post("/polar")
 async def polar_webhook(request: Request):
+    # Fail fast if webhook secret not configured
+    if not POLAR_WEBHOOK_SECRET:
+        logger.error("POLAR_WEBHOOK_SECRET not configured")
+        raise HTTPException(status_code=503, detail="Webhook not configured")
     """
     Handle Polar webhook events.
     

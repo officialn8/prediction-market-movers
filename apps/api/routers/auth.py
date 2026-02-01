@@ -10,15 +10,19 @@ import bcrypt
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_validator
+from fastapi import Request
 
 from packages.core.storage import get_db_pool
+from apps.api.main import limiter
 
 router = APIRouter()
 security = HTTPBearer()
 
-# Config
-JWT_SECRET = os.getenv("JWT_SECRET", "change-me-in-production")
+# Config - JWT_SECRET must be set in production
+JWT_SECRET = os.getenv("JWT_SECRET")
+if not JWT_SECRET:
+    raise RuntimeError("JWT_SECRET environment variable is required")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_HOURS = 24 * 7  # 1 week
 
@@ -31,6 +35,17 @@ class UserRegister(BaseModel):
     email: EmailStr
     password: str
     name: Optional[str] = None
+    
+    @field_validator('password')
+    @classmethod
+    def validate_password(cls, v: str) -> str:
+        if len(v) < 8:
+            raise ValueError('Password must be at least 8 characters')
+        if not any(c.isupper() for c in v):
+            raise ValueError('Password must contain an uppercase letter')
+        if not any(c.isdigit() for c in v):
+            raise ValueError('Password must contain a digit')
+        return v
 
 
 class UserLogin(BaseModel):
@@ -115,7 +130,8 @@ async def get_current_user(
 # ============================================================================
 
 @router.post("/register", response_model=TokenResponse)
-async def register(data: UserRegister):
+@limiter.limit("5/minute")
+async def register(request: Request, data: UserRegister):
     """Register a new user."""
     db = get_db_pool()
     
@@ -159,7 +175,8 @@ async def register(data: UserRegister):
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(data: UserLogin):
+@limiter.limit("5/minute")
+async def login(request: Request, data: UserLogin):
     """Login with email and password."""
     db = get_db_pool()
     
