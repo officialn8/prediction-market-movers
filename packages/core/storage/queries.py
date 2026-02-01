@@ -525,6 +525,57 @@ class MarketQueries:
         return db.execute(query, (market_ids,), fetch=True) or []
 
     @staticmethod
+    def get_token_price_deltas(
+        token_ids: list[UUID],
+        window_minutes: int = 5,
+    ) -> list[dict]:
+        """
+        Get latest price and short-window delta for tokens.
+
+        Returns per token: latest_price, past_price, move_pp, latest_ts, past_ts.
+        move_pp is percentage points (price delta * 100).
+        """
+        if not token_ids:
+            return []
+
+        db = get_db_pool()
+        query = """
+            WITH latest AS (
+                SELECT DISTINCT ON (token_id)
+                    token_id,
+                    price as latest_price,
+                    ts as latest_ts
+                FROM snapshots
+                WHERE token_id = ANY(%s::uuid[])
+                ORDER BY token_id, ts DESC
+            ),
+            past AS (
+                SELECT DISTINCT ON (token_id)
+                    token_id,
+                    price as past_price,
+                    ts as past_ts
+                FROM snapshots
+                WHERE token_id = ANY(%s::uuid[])
+                  AND ts <= NOW() - (%s * INTERVAL '1 minute')
+                ORDER BY token_id, ts DESC
+            )
+            SELECT
+                l.token_id,
+                l.latest_price,
+                l.latest_ts,
+                p.past_price,
+                p.past_ts,
+                CASE
+                    WHEN p.past_price IS NOT NULL
+                        THEN ROUND(((l.latest_price - p.past_price) * 100)::numeric, 2)
+                    ELSE NULL
+                END as move_pp
+            FROM latest l
+            LEFT JOIN past p ON l.token_id = p.token_id
+        """
+        return db.execute(query, (token_ids, token_ids, window_minutes), fetch=True) or []
+
+    @staticmethod
     def get_category_stats(hours: int = 24) -> list[dict]:
         """
         Get aggregated statistics by category.
