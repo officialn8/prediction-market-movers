@@ -353,7 +353,8 @@ class MarketQueries:
                 m.title,
                 m.source,
                 m.category,
-                m.url
+                m.url,
+                m.end_date
             FROM changes c
             JOIN market_tokens mt ON c.token_id = mt.token_id
             JOIN markets m ON mt.market_id = m.market_id

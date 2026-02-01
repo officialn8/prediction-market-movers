@@ -11,7 +11,9 @@ Generates alerts for significant market activity.
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from decimal import Decimal
+from typing import Optional
 from uuid import UUID
 
 from packages.core.storage.queries import AnalyticsQueries, MarketQueries, VolumeQueries
@@ -20,13 +22,43 @@ from packages.core.settings import settings
 
 logger = logging.getLogger(__name__)
 
-# Configuration
-ALERT_THRESHOLD_PP = Decimal("10.0")       # 10% price move threshold
+# Configuration - Time-to-expiry aware thresholds
+ALERT_THRESHOLD_PP = Decimal("10.0")       # Default for distant markets (>48h)
+CLOSING_THRESHOLD_PP = Decimal("25.0")     # Higher for markets closing within 48h
+IMMINENT_THRESHOLD_PP = Decimal("50.0")    # Even higher for markets closing within 6h
 ALERT_WINDOW_HOURS = 1                      # Look at 1-hour window
 MIN_VOLUME_FOR_ALERT = Decimal("1000")      # $1,000 minimum volume
 VOLUME_SPIKE_THRESHOLD = Decimal("3.0")     # 3x normal volume for alert
 COMBINED_MOVE_THRESHOLD = Decimal("5.0")    # 5% move when combined with spike
 COMBINED_SPIKE_THRESHOLD = Decimal("2.0")   # 2x spike when combined with move
+
+
+def get_dynamic_threshold(end_date: Optional[datetime]) -> Decimal:
+    """
+    Calculate alert threshold based on time remaining until market closes.
+    
+    Markets closing soon naturally have larger price swings as they approach
+    settlement. We require bigger moves to trigger alerts for these markets
+    to filter out settlement mechanics noise.
+    
+    Returns:
+        Decimal threshold in percentage points (pp)
+    """
+    if end_date is None:
+        return ALERT_THRESHOLD_PP
+    
+    now = datetime.now(timezone.utc)
+    # Handle naive datetime by assuming UTC
+    if end_date.tzinfo is None:
+        end_date = end_date.replace(tzinfo=timezone.utc)
+    
+    hours_remaining = (end_date - now).total_seconds() / 3600
+    
+    if hours_remaining <= 6:
+        return IMMINENT_THRESHOLD_PP   # 50pp - only extreme moves matter
+    if hours_remaining <= 48:
+        return CLOSING_THRESHOLD_PP    # 25pp - higher bar for closing markets
+    return ALERT_THRESHOLD_PP          # 10pp - normal sensitivity
 
 
 async def run_alerts_check() -> None:
@@ -75,6 +107,10 @@ async def run_alerts_check() -> None:
                 abs_move = abs(move_pp)
                 title = mover["title"]
                 outcome = mover["outcome"]
+                end_date = mover.get("end_date")
+
+                # Get dynamic threshold based on time-to-expiry
+                threshold = get_dynamic_threshold(end_date)
 
                 # Get volume
                 vol = mover.get("latest_volume") or mover.get("volume_24h")
@@ -96,12 +132,12 @@ async def run_alerts_check() -> None:
                 # Get volume spike ratio if available
                 spike_ratio = volume_spike_map.get(token_id_str)
 
-                # Use unified significance check
+                # Use unified significance check with dynamic threshold
                 is_significant, reason = metrics.is_significant_event(
                     abs_move_pp=abs_move,
                     volume=volume,
                     spike_ratio=spike_ratio,
-                    min_move_pp=ALERT_THRESHOLD_PP,
+                    min_move_pp=threshold,
                     min_volume=MIN_VOLUME_FOR_ALERT,
                     min_spike_ratio=VOLUME_SPIKE_THRESHOLD,
                 )
@@ -145,6 +181,16 @@ async def run_alerts_check() -> None:
                     alert_parts.append(f"📊 {spike_ratio:.1f}x volume")
 
                 alert_parts.append(f"${volume:,.0f} vol")
+                
+                # Add time-to-close context for closing markets
+                if end_date:
+                    now = datetime.now(timezone.utc)
+                    if end_date.tzinfo is None:
+                        end_date = end_date.replace(tzinfo=timezone.utc)
+                    hours_left = (end_date - now).total_seconds() / 3600
+                    if hours_left <= 48:
+                        alert_parts.append(f"closes in {hours_left:.0f}h")
+                
                 alert_parts.append(f"[{reason}]")
 
                 reason_text = " | ".join(alert_parts)
@@ -155,7 +201,7 @@ async def run_alerts_check() -> None:
                     token_id=token_id,
                     window_seconds=window_seconds,
                     move_pp=move_pp,
-                    threshold_pp=ALERT_THRESHOLD_PP,
+                    threshold_pp=threshold,
                     reason=reason_text,
                 )
 
