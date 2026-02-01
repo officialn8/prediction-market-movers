@@ -66,16 +66,20 @@ export default function PricingPage() {
     setError(null)
 
     try {
-      // Get user ID from auth (you'd get this from your auth context)
-      const userId = 'current-user-id' // TODO: Get from auth
+      // Get auth token from localStorage (set during login)
+      const token = localStorage.getItem('token')
+      if (!token) {
+        window.location.href = '/login?redirect=/pricing'
+        return
+      }
       
       const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/webhooks/create-checkout`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          // Authorization header if needed
+          'Authorization': `Bearer ${token}`,
         },
-        body: JSON.stringify({ tier, user_id: userId }),
+        body: JSON.stringify({ tier }),
       })
 
       if (!res.ok) {
@@ -84,7 +88,7 @@ export default function PricingPage() {
 
       const data = await res.json()
       
-      // Redirect to Stripe Checkout
+      // Redirect to Polar Checkout
       window.location.href = data.checkout_url
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong')
@@ -173,7 +177,7 @@ export default function PricingPage() {
             All plans include a 7-day free trial. Cancel anytime.
           </p>
           <div className="flex justify-center gap-8 mt-6 text-sm text-gray-500">
-            <span>🔒 Secure checkout via Stripe</span>
+            <span>🔒 Secure checkout via Polar</span>
             <span>💳 No credit card for free plan</span>
             <span>📧 Support: support@pmm.com</span>
           </div>
