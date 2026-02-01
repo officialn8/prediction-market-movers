@@ -1320,14 +1320,15 @@ class VolumeQueries:
 
         query = """
             WITH current AS (
-                SELECT DISTINCT ON (token_id)
+                SELECT
                     token_id,
                     volume_24h as current_volume,
                     price as current_price,
-                    ts
-                FROM snapshots
-                WHERE volume_24h IS NOT NULL
-                ORDER BY token_id, ts DESC
+                    volume_source,
+                    wss_updated_at,
+                    gamma_updated_at
+                FROM v_latest_volumes
+                WHERE has_volume_data = true
             ),
             averages AS (
                 SELECT
