@@ -16,7 +16,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
-from apps.api.routers import auth, markets, alerts, users, webhooks, system
+from apps.api.routers import auth, markets, alerts, users, webhooks, system, arbitrage
 from packages.core.storage import get_db_pool
 
 security = HTTPBearer()
@@ -65,6 +65,7 @@ app.include_router(markets.router, prefix="/markets", tags=["Markets"])
 app.include_router(alerts.router, prefix="/alerts", tags=["Alerts"])
 app.include_router(webhooks.router, prefix="/webhooks", tags=["Webhooks"])
 app.include_router(system.router, prefix="/system", tags=["System"])
+app.include_router(arbitrage.router, prefix="/arbitrage", tags=["Arbitrage"])
 
 
 @app.get("/health")

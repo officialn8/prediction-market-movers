@@ -1613,3 +1613,329 @@ class WatchlistQueries:
         """
         db.execute(query, (user_session_id, market_id))
 
+
+@dataclass
+class ArbitrageQueries:
+    """
+    SQL query methods for cross-platform arbitrage detection.
+    Identifies opportunities when combined price of YES on one platform
+    and NO on another is less than $1.
+    """
+
+    @staticmethod
+    def upsert_market_pair(
+        polymarket_market_id: UUID,
+        kalshi_market_id: UUID,
+        matching_method: str = "manual",
+        similarity_score: Optional[Decimal] = None,
+        notes: Optional[str] = None,
+    ) -> dict:
+        """
+        Create or update a market pair for arbitrage detection.
+        
+        Args:
+            polymarket_market_id: UUID of Polymarket market
+            kalshi_market_id: UUID of Kalshi market
+            matching_method: 'manual', 'fuzzy', or 'exact'
+            similarity_score: 0-1 score for fuzzy matches
+            notes: Description of the pairing
+            
+        Returns:
+            The upserted market_pair record
+        """
+        db = get_db_pool()
+        query = """
+            INSERT INTO market_pairs (
+                polymarket_market_id, kalshi_market_id, matching_method,
+                similarity_score, notes
+            )
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (polymarket_market_id)
+            DO UPDATE SET
+                kalshi_market_id = EXCLUDED.kalshi_market_id,
+                matching_method = EXCLUDED.matching_method,
+                similarity_score = EXCLUDED.similarity_score,
+                notes = EXCLUDED.notes,
+                updated_at = NOW()
+            RETURNING *
+        """
+        result = db.execute(
+            query,
+            (str(polymarket_market_id), str(kalshi_market_id),
+             matching_method, similarity_score, notes),
+            fetch=True,
+        )
+        return result[0] if result else {}
+
+    @staticmethod
+    def get_active_pairs() -> list[dict]:
+        """Get all active market pairs with latest prices."""
+        db = get_db_pool()
+        query = """
+            SELECT
+                mp.pair_id,
+                mp.polymarket_market_id,
+                mp.kalshi_market_id,
+                mp.matching_method,
+                mp.similarity_score,
+                mp.notes,
+                
+                -- Polymarket details
+                m_poly.title as polymarket_title,
+                m_poly.source_id as polymarket_source_id,
+                m_poly.url as polymarket_url,
+                
+                -- Kalshi details
+                m_kalshi.title as kalshi_title,
+                m_kalshi.source_id as kalshi_source_id,
+                m_kalshi.url as kalshi_url,
+                
+                -- Latest Polymarket prices (YES token)
+                (
+                    SELECT price FROM snapshots s
+                    JOIN market_tokens mt ON s.token_id = mt.token_id
+                    WHERE mt.market_id = mp.polymarket_market_id
+                      AND mt.outcome = 'Yes'
+                    ORDER BY s.ts DESC LIMIT 1
+                ) as polymarket_yes_price,
+                
+                -- Latest Kalshi prices (YES token)
+                (
+                    SELECT price FROM snapshots s
+                    JOIN market_tokens mt ON s.token_id = mt.token_id
+                    WHERE mt.market_id = mp.kalshi_market_id
+                      AND mt.outcome = 'Yes'
+                    ORDER BY s.ts DESC LIMIT 1
+                ) as kalshi_yes_price,
+                
+                -- 24h volumes
+                (
+                    SELECT volume_24h FROM v_latest_volumes v
+                    JOIN market_tokens mt ON v.token_id = mt.token_id
+                    WHERE mt.market_id = mp.polymarket_market_id
+                      AND mt.outcome = 'Yes'
+                ) as polymarket_volume_24h,
+                (
+                    SELECT volume_24h FROM v_latest_volumes v
+                    JOIN market_tokens mt ON v.token_id = mt.token_id
+                    WHERE mt.market_id = mp.kalshi_market_id
+                      AND mt.outcome = 'Yes'
+                ) as kalshi_volume_24h
+                
+            FROM market_pairs mp
+            JOIN markets m_poly ON mp.polymarket_market_id = m_poly.market_id
+            JOIN markets m_kalshi ON mp.kalshi_market_id = m_kalshi.market_id
+            WHERE mp.active = true
+              AND m_poly.status = 'active'
+              AND m_kalshi.status = 'active'
+        """
+        return db.execute(query, fetch=True) or []
+
+    @staticmethod
+    def record_opportunity(
+        pair_id: UUID,
+        arbitrage_type: str,
+        polymarket_yes_price: Decimal,
+        polymarket_no_price: Decimal,
+        kalshi_yes_price: Decimal,
+        kalshi_no_price: Decimal,
+        total_cost: Decimal,
+        profit_margin: Decimal,
+        profit_percentage: Decimal,
+        polymarket_volume_24h: Optional[Decimal] = None,
+        kalshi_volume_24h: Optional[Decimal] = None,
+        polymarket_spread: Optional[Decimal] = None,
+        kalshi_spread: Optional[Decimal] = None,
+        expires_minutes: int = 5,
+    ) -> dict:
+        """
+        Record a detected arbitrage opportunity.
+        
+        Args:
+            pair_id: The market pair UUID
+            arbitrage_type: 'YES_NO' or 'NO_YES'
+            polymarket_yes_price: Polymarket YES price (0-1)
+            polymarket_no_price: Polymarket NO price (0-1)
+            kalshi_yes_price: Kalshi YES price (0-1)
+            kalshi_no_price: Kalshi NO price (0-1)
+            total_cost: Combined cost to buy both positions
+            profit_margin: 1 - total_cost
+            profit_percentage: (profit_margin / total_cost) * 100
+            polymarket_volume_24h: Polymarket 24h volume
+            kalshi_volume_24h: Kalshi 24h volume
+            polymarket_spread: Polymarket bid-ask spread
+            kalshi_spread: Kalshi bid-ask spread
+            expires_minutes: Minutes until opportunity expires
+            
+        Returns:
+            The recorded opportunity
+        """
+        db = get_db_pool()
+        min_volume = None
+        if polymarket_volume_24h is not None and kalshi_volume_24h is not None:
+            min_volume = min(polymarket_volume_24h, kalshi_volume_24h)
+        elif polymarket_volume_24h is not None:
+            min_volume = polymarket_volume_24h
+        elif kalshi_volume_24h is not None:
+            min_volume = kalshi_volume_24h
+
+        query = """
+            INSERT INTO arbitrage_opportunities (
+                pair_id, arbitrage_type,
+                polymarket_yes_price, polymarket_no_price,
+                kalshi_yes_price, kalshi_no_price,
+                total_cost, profit_margin, profit_percentage,
+                polymarket_volume_24h, kalshi_volume_24h, min_volume_24h,
+                polymarket_spread, kalshi_spread,
+                expires_at
+            )
+            VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                NOW() + (%s * INTERVAL '1 minute')
+            )
+            RETURNING *
+        """
+        result = db.execute(
+            query,
+            (str(pair_id), arbitrage_type,
+             polymarket_yes_price, polymarket_no_price,
+             kalshi_yes_price, kalshi_no_price,
+             total_cost, profit_margin, profit_percentage,
+             polymarket_volume_24h, kalshi_volume_24h, min_volume,
+             polymarket_spread, kalshi_spread,
+             expires_minutes),
+            fetch=True,
+        )
+        return result[0] if result else {}
+
+    @staticmethod
+    def get_active_opportunities(
+        min_profit_pct: Decimal = Decimal("0.2"),
+        min_volume: Decimal = Decimal("100"),
+        limit: int = 50,
+    ) -> list[dict]:
+        """
+        Get currently active arbitrage opportunities.
+        
+        Args:
+            min_profit_pct: Minimum profit percentage to include
+            min_volume: Minimum 24h volume on both platforms
+            limit: Max results to return
+            
+        Returns:
+            List of active opportunities sorted by profit percentage
+        """
+        db = get_db_pool()
+        query = """
+            SELECT * FROM v_active_arbitrage
+            WHERE profit_percentage >= %s
+              AND (min_volume_24h IS NULL OR min_volume_24h >= %s)
+            ORDER BY profit_percentage DESC
+            LIMIT %s
+        """
+        return db.execute(query, (min_profit_pct, min_volume, limit), fetch=True) or []
+
+    @staticmethod
+    def expire_old_opportunities() -> int:
+        """
+        Mark expired opportunities as expired.
+        
+        Returns:
+            Number of opportunities marked as expired
+        """
+        db = get_db_pool()
+        query = """
+            UPDATE arbitrage_opportunities
+            SET status = 'expired'
+            WHERE status = 'active'
+              AND expires_at IS NOT NULL
+              AND expires_at < NOW()
+            RETURNING opportunity_id
+        """
+        result = db.execute(query, fetch=True)
+        return len(result) if result else 0
+
+    @staticmethod
+    def get_opportunity_history(
+        pair_id: Optional[UUID] = None,
+        hours: int = 24,
+        limit: int = 100,
+    ) -> list[dict]:
+        """
+        Get historical arbitrage opportunities.
+        
+        Args:
+            pair_id: Optional filter by market pair
+            hours: Lookback period in hours
+            limit: Max results to return
+            
+        Returns:
+            List of historical opportunities
+        """
+        db = get_db_pool()
+        
+        pair_filter = "AND pair_id = %s" if pair_id else ""
+        params = [hours]
+        if pair_id:
+            params.append(str(pair_id))
+        params.append(limit)
+
+        query = f"""
+            SELECT
+                ao.*,
+                m_poly.title as polymarket_title,
+                m_kalshi.title as kalshi_title
+            FROM arbitrage_opportunities ao
+            JOIN market_pairs mp ON ao.pair_id = mp.pair_id
+            JOIN markets m_poly ON mp.polymarket_market_id = m_poly.market_id
+            JOIN markets m_kalshi ON mp.kalshi_market_id = m_kalshi.market_id
+            WHERE ao.detected_at > NOW() - (%s * INTERVAL '1 hour')
+              {pair_filter}
+            ORDER BY ao.detected_at DESC
+            LIMIT %s
+        """
+        return db.execute(query, tuple(params), fetch=True) or []
+
+    @staticmethod
+    def find_similar_markets(
+        title: str,
+        source: str,
+        threshold: float = 0.85,
+        limit: int = 10,
+    ) -> list[dict]:
+        """
+        Find markets on the opposite platform with similar titles.
+        Uses pg_trgm for fuzzy matching.
+        
+        Args:
+            title: Market title to match
+            source: Source to search ('polymarket' or 'kalshi')
+            threshold: Minimum similarity score (0-1)
+            limit: Max results to return
+            
+        Returns:
+            List of potential matches with similarity scores
+        """
+        db = get_db_pool()
+        query = """
+            SELECT
+                market_id,
+                source,
+                source_id,
+                title,
+                category,
+                url,
+                SIMILARITY(title, %s) as similarity_score
+            FROM markets
+            WHERE source = %s
+              AND status = 'active'
+              AND SIMILARITY(title, %s) >= %s
+            ORDER BY SIMILARITY(title, %s) DESC
+            LIMIT %s
+        """
+        return db.execute(
+            query,
+            (title, source, title, threshold, title, limit),
+            fetch=True,
+        ) or []
+
