@@ -5,11 +5,17 @@
 
 import { betterAuth } from "better-auth";
 import { polar, checkout, portal, webhooks } from "@polar-sh/better-auth";
+import { Polar } from "@polar-sh/sdk";
 import { Pool } from "pg";
 
 // PostgreSQL connection for BetterAuth
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
+});
+
+// Polar SDK client
+const polarClient = new Polar({
+  accessToken: process.env.POLAR_ACCESS_TOKEN,
 });
 
 export const auth = betterAuth({
@@ -78,7 +84,7 @@ export const auth = betterAuth({
   plugins: [
     // Polar integration
     polar({
-      accessToken: process.env.POLAR_ACCESS_TOKEN!,
+      client: polarClient,
       // Auto-create Polar customer on signup
       createCustomerOnSignUp: true,
       // Use plugins for checkout, portal, webhooks

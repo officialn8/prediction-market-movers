@@ -92,7 +92,9 @@ export default function DashboardPage() {
   // Don't render if no session (will redirect)
   if (!session?.user) return null
   
-  const user = session.user
+  // Extend user with tier (BetterAuth doesn't include tier by default)
+  // TODO: Fetch actual tier from Polar subscription via API
+  const userWithTier = { ...session.user, tier: 'free' as 'free' | 'pro' | 'enterprise' }
 
   return (
     <div className="min-h-screen bg-[#050505]">
@@ -129,14 +131,14 @@ export default function DashboardPage() {
               <span className="text-sm text-gray-400">Current plan</span>
               <span className={`
                 text-xs font-bold uppercase px-2 py-0.5 rounded
-                ${user.tier === 'pro' ? 'bg-primary-500/20 text-primary-300' : 
-                  user.tier === 'enterprise' ? 'bg-purple-500/20 text-purple-300' : 
+                ${userWithTier.tier === 'pro' ? 'bg-primary-500/20 text-primary-300' : 
+                  userWithTier.tier === 'enterprise' ? 'bg-purple-500/20 text-purple-300' : 
                   'bg-gray-700 text-gray-400'}
               `}>
-                {user.tier}
+                {userWithTier.tier}
               </span>
             </div>
-            {user.tier === 'free' && (
+            {userWithTier.tier === 'free' && (
               <>
                 <div className="text-sm text-gray-300 mb-3">
                   <span className="text-amber-400 font-medium">2/3</span> alerts used
@@ -155,11 +157,11 @@ export default function DashboardPage() {
           {/* User */}
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-full bg-gradient-to-br from-primary-500 to-primary-700 flex items-center justify-center font-medium">
-              {(user.name || user.email)[0].toUpperCase()}
+              {(userWithTier.name || userWithTier.email)[0].toUpperCase()}
             </div>
             <div className="flex-1 min-w-0">
-              <div className="font-medium text-white truncate">{user.name || user.email}</div>
-              <div className="text-xs text-gray-500 truncate">{user.email}</div>
+              <div className="font-medium text-white truncate">{userWithTier.name || userWithTier.email}</div>
+              <div className="text-xs text-gray-500 truncate">{userWithTier.email}</div>
             </div>
             <button
               onClick={handleLogout}
@@ -180,7 +182,7 @@ export default function DashboardPage() {
             <div>
               <h1 className="text-2xl font-bold text-white">Dashboard</h1>
               <p className="text-sm text-gray-500">
-                Welcome back, {user.name || user.email.split('@')[0]}
+                Welcome back, {userWithTier.name || userWithTier.email.split('@')[0]}
               </p>
             </div>
             
