@@ -25,6 +25,7 @@ from apps.collector.adapters.kalshi_wss import (
 )
 from apps.collector.adapters.kalshi import KalshiAdapter
 from apps.collector.jobs.kalshi_sync import sync_markets, get_sync_state
+from apps.collector.jobs.movers_cache import check_instant_mover, broadcast_mover_alert
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,22 @@ class KalshiWSSSync:
         self._messages_received = 0
         self._trades_received = 0
         self._latest_latency_ms = 0.0
+        self._instant_mover_last_ts: Dict[str, float] = {}
+        self._alert_tasks: set[asyncio.Task] = set()
+
+    def _track_alert_task(self, task: asyncio.Task) -> None:
+        self._alert_tasks.add(task)
+
+        def _on_done(done_task: asyncio.Task) -> None:
+            self._alert_tasks.discard(done_task)
+            try:
+                exc = done_task.exception()
+            except asyncio.CancelledError:
+                return
+            if exc:
+                logger.warning(f"Instant mover alert task failed: {exc}")
+
+        task.add_done_callback(_on_done)
     
     async def initialize(self) -> bool:
         """
@@ -94,7 +111,10 @@ class KalshiWSSSync:
         
         # Get all Kalshi markets with their token IDs
         rows = db.execute("""
-            SELECT mt.token_id, mt.source_token_id, m.source_id
+            SELECT mt.token_id,
+                   mt.source_token_id,
+                   m.source_id,
+                   (SELECT price FROM snapshots s WHERE s.token_id = mt.token_id ORDER BY ts DESC LIMIT 1) as price
             FROM markets m
             JOIN market_tokens mt ON mt.market_id = m.market_id
             WHERE m.source = 'kalshi' AND m.status = 'active'
@@ -108,6 +128,8 @@ class KalshiWSSSync:
             if ticker:
                 self.ticker_to_token_id[ticker] = str(row["token_id"])
                 tickers.append(ticker)
+                if row.get("price") is not None:
+                    self.price_cache[ticker] = float(row["price"])
         
         if not tickers:
             logger.warning("No Kalshi markets found to subscribe to")
@@ -184,8 +206,23 @@ class KalshiWSSSync:
         if not token_id:
             return
         
-        # Update price cache
+        # Update price cache (after mover check)
         price = trade.price_decimal
+        old_price = self.price_cache.get(ticker)
+        if old_price is not None:
+            now_ts = time.time()
+            last_alert_ts = self._instant_mover_last_ts.get(token_id)
+            if (
+                last_alert_ts is None
+                or (now_ts - last_alert_ts) >= settings.instant_mover_debounce_seconds
+            ):
+                mover = await check_instant_mover(token_id, old_price, price)
+                if mover:
+                    logger.info(f"Instant Mover Detected: {ticker} {old_price:.4f} -> {price:.4f}")
+                    self._instant_mover_last_ts[token_id] = now_ts
+                    task = asyncio.create_task(broadcast_mover_alert(mover))
+                    self._track_alert_task(task)
+
         self.price_cache[ticker] = price
         
         # Accumulate volume (notional value)

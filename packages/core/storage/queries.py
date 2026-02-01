@@ -4,7 +4,7 @@ Centralized query definitions for consistency and maintainability.
 """
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
 from uuid import UUID
@@ -1094,8 +1094,8 @@ class VolumeQueries:
             trade_ts: Optional trade timestamp (defaults to NOW())
         """
         db = get_db_pool()
-        query = "SELECT accumulate_trade_volume(%s, %s, %s)"
-        params = (str(token_id), volume, trade_ts or datetime.utcnow())
+        query = "SELECT public.accumulate_trade_volume(%s::uuid, %s::numeric, %s::timestamptz)"
+        params = (str(token_id), volume, trade_ts or datetime.now(timezone.utc))
         db.execute(query, params)
     
     @staticmethod

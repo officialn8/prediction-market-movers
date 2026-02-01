@@ -135,6 +135,64 @@ def run_migrations() -> None:
         logger.info(f"Successfully applied {applied_count} new migration(s).")
 
 
+def verify_schema_readiness() -> None:
+    """
+    Verify critical tables and functions exist before starting background tasks.
+    Exits on missing schema elements to avoid noisy runtime failures.
+    """
+    db = get_db_pool()
+    required_tables = [
+        "markets",
+        "market_tokens",
+        "snapshots",
+        "schema_migrations",
+        "system_status",
+        "volume_spikes",
+        "user_alerts",
+        "movers_cache",
+        "ohlc_1m",
+        "ohlc_5m",
+        "ohlc_1h",
+        "trade_volumes",
+    ]
+
+    missing_tables = []
+    for table in required_tables:
+        result = db.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_name = %s
+            ) as exists
+            """,
+            (table,),
+            fetch=True,
+        )
+        if not result or not result[0].get("exists"):
+            missing_tables.append(table)
+
+    func_result = db.execute(
+        """
+        SELECT EXISTS(
+            SELECT 1
+            FROM pg_proc p
+            JOIN pg_namespace n ON p.pronamespace = n.oid
+            WHERE n.nspname = 'public' AND p.proname = 'accumulate_trade_volume'
+        ) as exists
+        """,
+        fetch=True,
+    )
+    has_accumulate = bool(func_result and func_result[0].get("exists"))
+
+    if missing_tables or not has_accumulate:
+        if missing_tables:
+            logger.error(f"Schema readiness check failed. Missing tables: {missing_tables}")
+        if not has_accumulate:
+            logger.error("Schema readiness check failed. Missing function: public.accumulate_trade_volume")
+        sys.exit(1)
+
+
 
 def _configure_logging() -> None:
     logging.basicConfig(
@@ -506,6 +564,13 @@ async def _amain() -> None:
         run_migrations()
     except Exception:
         logger.exception("Failed to run migrations.")
+        sys.exit(1)
+
+    # Verify schema readiness before starting loops
+    try:
+        verify_schema_readiness()
+    except Exception:
+        logger.exception("Schema readiness verification failed.")
         sys.exit(1)
 
     shutdown = Shutdown()

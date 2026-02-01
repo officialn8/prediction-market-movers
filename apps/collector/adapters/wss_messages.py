@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal, Optional, Any, Union
 import logging
 
@@ -103,7 +103,7 @@ def parse_wss_message(raw: dict[str, Any]) -> list[Union[PriceUpdate, BookUpdate
     if event_type == "price_change" and "price_changes" in raw:
         updates = []
         try:
-            ts = datetime.fromtimestamp(int(raw["timestamp"]) / 1000)
+            ts = datetime.fromtimestamp(int(raw["timestamp"]) / 1000, tz=timezone.utc)
             for change in raw["price_changes"]:
                 updates.append(PriceUpdate(
                     token_id=change["asset_id"],
@@ -121,7 +121,7 @@ def parse_wss_message(raw: dict[str, Any]) -> list[Union[PriceUpdate, BookUpdate
             return [PriceUpdate(
                 token_id=raw["asset_id"],
                 price=float(raw["price"]),
-                timestamp=datetime.fromtimestamp(int(raw["timestamp"]) / 1000)
+                timestamp=datetime.fromtimestamp(int(raw["timestamp"]) / 1000, tz=timezone.utc)
             )]
         except (KeyError, ValueError):
             return []
@@ -131,7 +131,7 @@ def parse_wss_message(raw: dict[str, Any]) -> list[Union[PriceUpdate, BookUpdate
     # =========================================================================
     if event_type == "last_trade_price":
         try:
-            ts = datetime.fromtimestamp(int(raw["timestamp"]) / 1000)
+            ts = datetime.fromtimestamp(int(raw["timestamp"]) / 1000, tz=timezone.utc)
             
             # Can contain multiple trades in "last_trade_prices" array
             if "last_trade_prices" in raw:
@@ -154,7 +154,7 @@ def parse_wss_message(raw: dict[str, Any]) -> list[Union[PriceUpdate, BookUpdate
                 size=float(raw.get("size", 0)),
                 side=raw.get("side", "BUY").upper(),
                 fee_rate_bps=raw.get("fee_rate_bps"),
-                timestamp=datetime.fromtimestamp(int(raw["timestamp"]) / 1000)
+                timestamp=datetime.fromtimestamp(int(raw["timestamp"]) / 1000, tz=timezone.utc)
             )]
         except (KeyError, ValueError) as e:
             logger.debug(f"Failed to parse last_trade_price: {e}")
@@ -165,7 +165,7 @@ def parse_wss_message(raw: dict[str, Any]) -> list[Union[PriceUpdate, BookUpdate
     # =========================================================================
     if event_type == "best_bid_ask":
         try:
-            ts = datetime.fromtimestamp(int(raw["timestamp"]) / 1000)
+            ts = datetime.fromtimestamp(int(raw["timestamp"]) / 1000, tz=timezone.utc)
             
             if "changes" in raw:
                 updates = []
@@ -203,7 +203,7 @@ def parse_wss_message(raw: dict[str, Any]) -> list[Union[PriceUpdate, BookUpdate
                 best_bid=best_bid,
                 best_ask=best_ask,
                 spread=spread,
-                timestamp=datetime.fromtimestamp(int(raw.get("timestamp", 0)) / 1000)
+                timestamp=datetime.fromtimestamp(int(raw.get("timestamp", 0)) / 1000, tz=timezone.utc)
             )]
         except (KeyError, ValueError, IndexError) as e:
             logger.debug(f"Failed to parse book: {e}")
@@ -218,7 +218,7 @@ def parse_wss_message(raw: dict[str, Any]) -> list[Union[PriceUpdate, BookUpdate
                 market_id=raw.get("market_id", raw.get("market", "")),
                 condition_id=raw.get("condition_id", ""),
                 tokens=raw.get("tokens", []),
-                timestamp=datetime.fromtimestamp(int(raw.get("timestamp", 0)) / 1000)
+                timestamp=datetime.fromtimestamp(int(raw.get("timestamp", 0)) / 1000, tz=timezone.utc)
             )]
         except (KeyError, ValueError) as e:
             logger.debug(f"Failed to parse new_market: {e}")
@@ -233,7 +233,7 @@ def parse_wss_message(raw: dict[str, Any]) -> list[Union[PriceUpdate, BookUpdate
                 market_id=raw.get("market_id", raw.get("market", "")),
                 outcome=raw.get("outcome", ""),
                 winning_token_id=raw.get("winning_token_id", ""),
-                timestamp=datetime.fromtimestamp(int(raw.get("timestamp", 0)) / 1000)
+                timestamp=datetime.fromtimestamp(int(raw.get("timestamp", 0)) / 1000, tz=timezone.utc)
             )]
         except (KeyError, ValueError) as e:
             logger.debug(f"Failed to parse market_resolved: {e}")

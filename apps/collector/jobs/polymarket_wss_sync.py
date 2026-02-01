@@ -4,6 +4,7 @@ import time
 import json
 from collections import defaultdict
 from datetime import datetime
+from decimal import Decimal
 from uuid import UUID
 
 from packages.core.settings import settings
@@ -99,6 +100,22 @@ async def run_wss_loop(shutdown: Shutdown) -> None:
     # Health logging state
     last_health_log = time.time()
     messages_since_last_health = 0
+    instant_mover_last_ts: dict[str, float] = {}
+    alert_tasks: set[asyncio.Task] = set()
+
+    def _track_alert_task(task: asyncio.Task) -> None:
+        alert_tasks.add(task)
+
+        def _on_done(done_task: asyncio.Task) -> None:
+            alert_tasks.discard(done_task)
+            try:
+                exc = done_task.exception()
+            except asyncio.CancelledError:
+                return
+            if exc:
+                logger.warning(f"Instant mover alert task failed: {exc}")
+
+        task.add_done_callback(_on_done)
     
     # Volume tracking: token_id -> accumulated volume this batch
     volume_accumulator: dict[str, float] = defaultdict(float)
@@ -153,10 +170,20 @@ async def run_wss_loop(shutdown: Shutdown) -> None:
                         # Check for instant mover (use db_token_id for DB operations)
                         db_token_id = source_to_db_token.get(source_token_id)
                         if db_token_id:
-                            mover = await check_instant_mover(db_token_id, old_price, event.price)
-                            if mover:
-                                logger.info(f"Instant Mover Detected: {source_token_id} {old_price:.4f} -> {event.price:.4f}")
-                                asyncio.create_task(broadcast_mover_alert(mover))
+                            now_ts = time.time()
+                            last_alert_ts = instant_mover_last_ts.get(db_token_id)
+                            if (
+                                last_alert_ts is None
+                                or (now_ts - last_alert_ts) >= settings.instant_mover_debounce_seconds
+                            ):
+                                mover = await check_instant_mover(db_token_id, old_price, event.price)
+                                if mover:
+                                    logger.info(
+                                        f"Instant Mover Detected: {source_token_id} {old_price:.4f} -> {event.price:.4f}"
+                                    )
+                                    instant_mover_last_ts[db_token_id] = now_ts
+                                    task = asyncio.create_task(broadcast_mover_alert(mover))
+                                    _track_alert_task(task)
 
                     # Update local price map
                     price_map[source_token_id] = event.price
@@ -175,6 +202,7 @@ async def run_wss_loop(shutdown: Shutdown) -> None:
                     # Volume = size * price (notional value)
                     trade_volume = event.size * event.price
                     volume_accumulator[source_token_id] += trade_volume
+                    trade_volume_decimal = Decimal(str(trade_volume)).quantize(Decimal("0.01"))
                     
                     # Also update price from trade (more recent than price_change)
                     if source_token_id in price_map:
@@ -186,11 +214,11 @@ async def run_wss_loop(shutdown: Shutdown) -> None:
                     # Accumulate trade volume in database using stored function
                     # This provides real-time volume data for the dashboard
                     db_token_id = source_to_db_token.get(source_token_id)
-                    if db_token_id and trade_volume > 0:
+                    if db_token_id and trade_volume_decimal > 0:
                         try:
                             db_pool.execute(
-                                "SELECT accumulate_trade_volume(%s, %s, %s)",
-                                (db_token_id, trade_volume, event.timestamp)
+                                "SELECT public.accumulate_trade_volume(%s::uuid, %s::numeric, %s::timestamptz)",
+                                (db_token_id, trade_volume_decimal, event.timestamp)
                             )
                         except Exception as e:
                             logger.warning(f"Failed to accumulate trade volume: {e}")
@@ -219,8 +247,6 @@ async def run_wss_loop(shutdown: Shutdown) -> None:
                 # --- NEW: Latency Tracking ---
                 if hasattr(event, "timestamp") and event.timestamp:
                     try:
-                        # event.timestamp is a naive datetime from wss_messages
-                        # Convert to timestamp to compare with time.time()
                         msg_ts = event.timestamp.timestamp()
                         now_ts = time.time()
                         # Calculate latency in ms

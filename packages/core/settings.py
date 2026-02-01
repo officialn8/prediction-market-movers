@@ -50,6 +50,24 @@ class Settings(BaseSettings):
     sync_interval_seconds: int = Field(default=300, ge=60, le=3600)
     log_level: str = Field(default="INFO")
 
+    # Instant mover settings
+    instant_mover_threshold_pp: float = Field(
+        default=5.0,
+        description="Minimum price move (percentage points) for instant mover alerts",
+    )
+    instant_mover_min_quality_score: float = Field(
+        default=1.0,
+        description="Minimum quality score for instant mover alerts",
+    )
+    instant_mover_debounce_seconds: float = Field(
+        default=10.0,
+        description="Per-token cooldown window for instant mover alerts",
+    )
+    instant_mover_min_volume: float = Field(
+        default=0.0,
+        description="Minimum volume required to consider instant mover alerts (0 disables)",
+    )
+
     # Polymarket WebSocket Settings
     polymarket_use_wss: bool = Field(
         default=False,

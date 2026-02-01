@@ -24,6 +24,7 @@ from packages.core.storage.queries import MarketQueries, AnalyticsQueries, Volum
 from packages.core.storage.db import get_db_pool
 from packages.core.analytics import metrics
 from packages.core.analytics.metrics import MoverScorer, ZScoreMoverScorer
+from packages.core.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -206,15 +207,17 @@ _instant_scorer = MoverScorer(
     weight_move=1.0,
     weight_volume=1.0,
     weight_spike=0.5,
-    min_quality_score=Decimal("0.5"),  # Lower threshold for instant detection
+    min_quality_score=Decimal(str(settings.instant_mover_min_quality_score)),
 )
 
 async def check_instant_mover(
     token_id: str,
     old_price: float,
     new_price: float,
-    threshold_pp: float = 5.0,  # 5 percentage points
+    threshold_pp: float | None = None,
     volume: Optional[float] = None,
+    min_quality_score: float | None = None,
+    min_volume: float | None = None,
 ) -> Optional[MoverAlert]:
     """
     Check if price change qualifies as instant mover.
@@ -231,6 +234,12 @@ async def check_instant_mover(
     """
     if old_price <= 0:
         return None
+
+    threshold_pp = threshold_pp if threshold_pp is not None else settings.instant_mover_threshold_pp
+    min_quality_score = (
+        min_quality_score if min_quality_score is not None else settings.instant_mover_min_quality_score
+    )
+    min_volume = min_volume if min_volume is not None else settings.instant_mover_min_volume
     
     # Calculate move in percentage points (consistent with cache)
     move_pp = (new_price - old_price) * 100
@@ -243,12 +252,16 @@ async def check_instant_mover(
     # Calculate quality score if volume available
     quality_score = None
     if volume is not None and volume > 0:
+        if min_volume and volume < min_volume:
+            return None
         score, _, _ = _instant_scorer.score(
             price_now=Decimal(str(new_price)),
             price_then=Decimal(str(old_price)),
             volume=Decimal(str(volume)),
         )
         quality_score = float(score)
+        if quality_score < float(min_quality_score):
+            return None
     
     # Also calculate percentage change for backwards compatibility
     change_pct = (new_price - old_price) / old_price
