@@ -12,17 +12,14 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, HTTPException, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
+from apps.api.limiter import limiter
 from apps.api.routers import auth, markets, alerts, users, webhooks, system, arbitrage
 from packages.core.storage import get_db_pool
 
 security = HTTPBearer()
-
-# Rate limiter - uses client IP by default
-limiter = Limiter(key_func=get_remote_address)
 
 
 @asynccontextmanager

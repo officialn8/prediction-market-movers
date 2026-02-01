@@ -14,7 +14,7 @@ from pydantic import BaseModel, EmailStr, field_validator
 from fastapi import Request
 
 from packages.core.storage import get_db_pool
-from apps.api.main import limiter
+from apps.api.limiter import limiter
 
 router = APIRouter()
 security = HTTPBearer()
