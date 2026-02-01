@@ -71,6 +71,61 @@ def get_theme_css():
         """
 
 
+def _hydrate_market_context(movers: list[dict]) -> list[dict]:
+    """Fill missing market fields (title/source/category/url) from markets table."""
+    if not movers:
+        return movers
+
+    missing_ids = {
+        str(m.get("market_id"))
+        for m in movers
+        if m.get("market_id")
+        and (
+            not m.get("title")
+            or not m.get("source")
+            or not m.get("category")
+            or not m.get("url")
+        )
+    }
+
+    if not missing_ids:
+        return movers
+
+    db = get_db_pool()
+    rows = db.execute(
+        """
+        SELECT market_id, title, source, category, url
+        FROM markets
+        WHERE market_id = ANY(%s::uuid[])
+        """,
+        (list(missing_ids),),
+        fetch=True,
+    ) or []
+
+    lookup = {str(row["market_id"]): row for row in rows}
+    for mover in movers:
+        market_id = str(mover.get("market_id") or "")
+        if market_id in lookup:
+            record = lookup[market_id]
+            for key in ("title", "source", "category", "url"):
+                if not mover.get(key) and record.get(key):
+                    mover[key] = record.get(key)
+    return movers
+
+
+def _summarize_missing_fields(movers: list[dict]) -> dict:
+    """Count movers missing key fields for diagnostics."""
+    missing = {"market_id": 0, "title": 0, "url": 0}
+    for mover in movers:
+        if not mover.get("market_id"):
+            missing["market_id"] += 1
+        if not mover.get("title"):
+            missing["title"] += 1
+        if not mover.get("url"):
+            missing["url"] += 1
+    return missing
+
+
 def main():
     init_watchlist()
     
@@ -137,6 +192,19 @@ def main():
     
     # Fetch and display movers
     try:
+        db = get_db_pool()
+        db_healthy = db.health_check()
+        with st.expander("Connection status", expanded=False):
+            if db_healthy:
+                st.success("Database connection healthy")
+            else:
+                st.error("Database connection failed")
+            st.write(db.get_pool_stats())
+
+        if not db_healthy:
+            st.error("Unable to load movers until the database is healthy.")
+            return
+
         window_seconds = window_minutes * 60
         movers = []
         
@@ -158,6 +226,9 @@ def main():
                 direction=direction
             )
         
+        # Ensure market context fields are present for rendering/links
+        movers = _hydrate_market_context(movers)
+
         # Apply additional filters
         if source_filter:
             movers = [m for m in movers if m.get('source', '').lower() == source_filter]
@@ -183,6 +254,12 @@ def main():
         if not movers:
             st.info("No movers found with these filters. Try adjusting your criteria.")
             return
+
+        missing_fields = _summarize_missing_fields(movers)
+        if missing_fields["market_id"] or missing_fields["title"]:
+            st.warning("Some movers are missing market metadata. Data may be incomplete.")
+        if missing_fields["url"]:
+            st.caption(f"Links available for {len(movers) - missing_fields['url']} of {len(movers)} movers.")
         
         # Display as cards
         for mover in movers:

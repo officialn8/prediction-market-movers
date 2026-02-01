@@ -223,6 +223,7 @@ def render_mover_card(mover: dict, show_watchlist: bool = True) -> None:
 
     market_id = str(mover.get("market_id", ""))
     title = mover.get('title', 'Unknown Market')
+    market_url = mover.get("url") or mover.get("market_url") or ""
     category = mover.get('category', 'Uncategorized')
     
     # Check if in watchlist
@@ -250,6 +251,10 @@ def render_mover_card(mover: dict, show_watchlist: bool = True) -> None:
     outcome_color = "#10b981" if outcome == "YES" else "#ef4444"
     change_color = "#10b981" if pct_change > 0 else "#ef4444"
 
+    link_html = ""
+    if market_url:
+        link_html = f'<a href="{market_url}" target="_blank" style="display: inline-block; font-size: 0.8rem; color: #6366f1; text-decoration: none; margin-bottom: 0.25rem;">View market →</a>'
+
     # Build HTML string with proper structure
     html_content = f"""<div style="background: {card_bg}; border: 1px solid {card_border}; border-radius: 12px; padding: 1.25rem; margin-bottom: 0.5rem;">
   <div style="display: flex; justify-content: space-between; align-items: flex-start;">
@@ -260,6 +265,7 @@ def render_mover_card(mover: dict, show_watchlist: bool = True) -> None:
         {spike_badge}
       </div>
       <p style="font-family: system-ui, sans-serif; font-size: 1rem; font-weight: 500; color: {title_color}; margin: 0 0 0.5rem 0; line-height: 1.4;">{title}</p>
+      {link_html}
       <p style="font-family: monospace; font-size: 0.85rem; color: {muted_color}; margin: 0;">${old_price:.2f} → ${latest_price:.2f}</p>
       <div style="margin-top: 0.5rem; font-size: 0.85rem; color: {secondary_color};">📊 {reason}</div>
     </div>
