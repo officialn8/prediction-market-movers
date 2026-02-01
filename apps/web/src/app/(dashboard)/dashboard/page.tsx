@@ -4,17 +4,11 @@ import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { 
   Activity, Bell, TrendingUp, TrendingDown, Search, Plus, Settings, 
-  LogOut, ChevronRight, Zap, Eye, Flame, Clock, Filter
+  LogOut, ChevronRight, Zap, Eye, Flame, Clock, Filter, Loader2
 } from 'lucide-react'
 import Link from 'next/link'
 import { SystemStatus } from '@/components/ui/SystemStatus'
-
-interface User {
-  id: string
-  email: string
-  name?: string
-  tier: string
-}
+import { useSession, signOut } from '@/lib/auth-client'
 
 interface Mover {
   market_id: string
@@ -31,41 +25,37 @@ interface Mover {
 
 export default function DashboardPage() {
   const router = useRouter()
-  const [user, setUser] = useState<User | null>(null)
+  const { data: session, isPending } = useSession()
   const [movers, setMovers] = useState<Mover[]>([])
   const [window, setWindow] = useState<'1h' | '4h' | '24h'>('1h')
   const [loading, setLoading] = useState(true)
 
+  // Redirect to login if no session
   useEffect(() => {
-    const token = localStorage.getItem('token')
-    const userData = localStorage.getItem('user')
-    
-    if (!token || !userData) {
+    if (!isPending && !session?.user) {
       router.push('/login')
-      return
     }
+  }, [isPending, session, router])
 
-    setUser(JSON.parse(userData))
-    fetchMovers(window)
-  }, [])
-
+  // Fetch movers when session is ready
   useEffect(() => {
-    if (user) {
+    if (session?.user) {
       fetchMovers(window)
     }
-  }, [window])
+  }, [session])
+
+  useEffect(() => {
+    if (session?.user) {
+      fetchMovers(window)
+    }
+  }, [window, session])
 
   const fetchMovers = async (w: string) => {
     setLoading(true)
     try {
-      const token = localStorage.getItem('token')
-      const headers: HeadersInit = {}
-      if (token) {
-        headers['Authorization'] = `Bearer ${token}`
-      }
-      
+      // BetterAuth uses cookies, so credentials: 'include' is needed
       const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/markets/movers?window=${w}&limit=20`, {
-        headers
+        credentials: 'include',
       })
       
       if (!res.ok) {
@@ -82,13 +72,27 @@ export default function DashboardPage() {
     }
   }
 
-  const handleLogout = () => {
-    localStorage.removeItem('token')
-    localStorage.removeItem('user')
+  const handleLogout = async () => {
+    await signOut()
     router.push('/')
   }
 
-  if (!user) return null
+  // Show loading spinner while checking session
+  if (isPending) {
+    return (
+      <div className="min-h-screen bg-[#050505] flex items-center justify-center">
+        <div className="flex items-center gap-3 text-gray-400">
+          <Loader2 className="w-6 h-6 animate-spin" />
+          <span>Loading...</span>
+        </div>
+      </div>
+    )
+  }
+
+  // Don't render if no session (will redirect)
+  if (!session?.user) return null
+  
+  const user = session.user
 
   return (
     <div className="min-h-screen bg-[#050505]">
