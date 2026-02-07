@@ -7,10 +7,12 @@ Runs background ingestion jobs that sync markets/snapshots into Postgres.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import signal
 import sys
+import time
 from typing import Optional
 
 from packages.core.settings import settings
@@ -204,6 +206,24 @@ def _configure_logging() -> None:
     )
 
 
+def _upsert_polymarket_status(status_data: dict) -> None:
+    """Best-effort status write used by main-level polling fallback paths."""
+    try:
+        db = get_db_pool()
+        db.execute(
+            """
+            INSERT INTO system_status (key, value, updated_at)
+            VALUES ('polymarket_wss', %s, NOW())
+            ON CONFLICT (key) DO UPDATE SET
+                value = EXCLUDED.value,
+                updated_at = NOW()
+            """,
+            (json.dumps(status_data),),
+        )
+    except Exception as e:
+        logger.debug("Failed to upsert polymarket_wss status: %s", e)
+
+
 class Shutdown:
     """Signal-driven shutdown flag."""
     def __init__(self) -> None:
@@ -275,9 +295,39 @@ async def _fallback_to_polling(shutdown: Shutdown, interval: int = 30) -> None:
     from apps.collector.jobs.polymarket_sync import sync_once as poly_sync_once
     
     logger.info(f"Running fallback polling (interval={interval}s)")
+    _upsert_polymarket_status(
+        {
+            "connected": False,
+            "latency_ms": 0.0,
+            "messages_received": 0,
+            "snapshot_inserted_window": 0,
+            "snapshot_skipped_window": 0,
+            "snapshot_inserted_per_min": 0.0,
+            "snapshot_skipped_per_min": 0.0,
+            "subscription_count": 0,
+            "refresh_interval_seconds": 0,
+            "state": "polling_fallback",
+            "last_updated": time.time(),
+        }
+    )
     while not shutdown.is_set:
         try:
             await poly_sync_once()
+            _upsert_polymarket_status(
+                {
+                    "connected": False,
+                    "latency_ms": 0.0,
+                    "messages_received": 0,
+                    "snapshot_inserted_window": 0,
+                    "snapshot_skipped_window": 0,
+                    "snapshot_inserted_per_min": 0.0,
+                    "snapshot_skipped_per_min": 0.0,
+                    "subscription_count": 0,
+                    "refresh_interval_seconds": 0,
+                    "state": "polling_fallback",
+                    "last_updated": time.time(),
+                }
+            )
         except Exception:
             logger.exception("Error during fallback polling cycle")
         

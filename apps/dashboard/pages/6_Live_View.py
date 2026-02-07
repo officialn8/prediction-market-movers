@@ -110,6 +110,7 @@ def get_system_status_entries() -> dict:
 def get_live_tape(seconds: int, limit: int) -> list[dict]:
     """Fetch latest per-token snapshots within the time window."""
     db = get_db_pool()
+    sample_limit = max(limit * 20, 400)
     query = """
         WITH latest AS (
             SELECT DISTINCT ON (s.token_id)
@@ -138,7 +139,83 @@ def get_live_tape(seconds: int, limit: int) -> list[dict]:
         ORDER BY l.ts DESC
         LIMIT %s
     """
-    return db.execute(query, (seconds, limit), fetch=True) or []
+    rows = db.execute(query, (seconds, sample_limit), fetch=True) or []
+    return balance_rows_by_source(rows, limit)
+
+
+def balance_rows_by_source(rows: list[dict], limit: int) -> list[dict]:
+    """Keep Live View readable by preventing one source from crowding out others."""
+    if limit <= 0 or not rows:
+        return []
+
+    source_order: list[str] = []
+    for row in rows:
+        source = str(row.get("source") or "unknown").lower()
+        if source not in source_order:
+            source_order.append(source)
+
+    if not source_order:
+        return rows[:limit]
+
+    per_source_cap = max(1, limit // len(source_order))
+    counts = {source: 0 for source in source_order}
+    selected: list[dict] = []
+    selected_indexes: set[int] = set()
+
+    for idx, row in enumerate(rows):
+        source = str(row.get("source") or "unknown").lower()
+        if counts.get(source, 0) >= per_source_cap:
+            continue
+        selected.append(row)
+        selected_indexes.add(idx)
+        counts[source] = counts.get(source, 0) + 1
+        if len(selected) >= limit:
+            return selected
+
+    if len(selected) < limit:
+        for idx, row in enumerate(rows):
+            if idx in selected_indexes:
+                continue
+            selected.append(row)
+            if len(selected) >= limit:
+                break
+
+    return selected[:limit]
+
+
+def get_live_movers_balanced(window_seconds: int, limit: int) -> list[dict]:
+    """Fetch movers with source balancing so both venues stay visible."""
+    if limit <= 0:
+        return []
+
+    per_source_limit = max(1, limit // 2)
+    kalshi = MarketQueries.get_movers_window(
+        window_seconds=window_seconds,
+        limit=limit,
+        direction="both",
+        source="kalshi",
+    )
+    polymarket = MarketQueries.get_movers_window(
+        window_seconds=window_seconds,
+        limit=limit,
+        direction="both",
+        source="polymarket",
+    )
+
+    def _move_strength(item: dict) -> float:
+        try:
+            return abs(float(item.get("move_pp") or 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    selected = list(kalshi[:per_source_limit]) + list(polymarket[:per_source_limit])
+    if len(selected) < limit:
+        remainder = list(kalshi[per_source_limit:]) + list(polymarket[per_source_limit:])
+        remainder.sort(key=_move_strength, reverse=True)
+        selected.extend(remainder[: limit - len(selected)])
+
+    selected.sort(key=_move_strength, reverse=True)
+    return selected[:limit]
 
 
 def format_age(age_seconds: float | None) -> str:
@@ -148,6 +225,28 @@ def format_age(age_seconds: float | None) -> str:
         return f"{age_seconds:.0f}s"
     minutes = age_seconds / 60
     return f"{minutes:.1f}m"
+
+
+def get_service_badge(service: dict, last_age: float | None) -> tuple[str, str]:
+    """Map service status payload into a dashboard badge and state label."""
+    state = str(service.get("state") or "").strip().lower()
+    connected = bool(service.get("connected"))
+
+    stale_after = 60.0
+    refresh_interval = service.get("refresh_interval_seconds")
+    if refresh_interval is not None:
+        try:
+            stale_after = max(stale_after, float(refresh_interval) * 1.5)
+        except (TypeError, ValueError):
+            pass
+
+    if state in {"subscribing", "refreshing", "connecting"}:
+        return "🟡", state
+    if last_age is not None and last_age > stale_after:
+        return "🟡", "stale"
+    if connected:
+        return "🟢", state or "connected"
+    return "🔴", state or "disconnected"
 
 
 def render_status_bar():
@@ -195,17 +294,27 @@ def render_system_health_panel():
                 if not service:
                     st.caption(f"{key}: no recent status")
                     continue
-                connected = "🟢" if service.get("connected") else "🔴"
-                latency = service.get("latency_ms", 0)
+                latency = float(service.get("latency_ms", 0) or 0)
                 last_updated = service.get("db_updated_at")
                 last_age = None
                 if last_updated:
                     if last_updated.tzinfo is None:
                         last_updated = last_updated.replace(tzinfo=timezone.utc)
                     last_age = (datetime.now(timezone.utc) - last_updated).total_seconds()
+                badge, state_label = get_service_badge(service, last_age)
+                subs_count = service.get("subscription_count")
+                subs_target = service.get("subscription_target")
+                subs_text = ""
+                try:
+                    if subs_target is not None:
+                        subs_text = f" | subs {int(float(subs_count or 0))}/{int(float(subs_target))}"
+                    elif subs_count is not None:
+                        subs_text = f" | subs {int(float(subs_count))}"
+                except (TypeError, ValueError):
+                    subs_text = ""
                 st.caption(
-                    f"{key}: {connected} latency {latency:.0f}ms | "
-                    f"last {format_age(last_age)}"
+                    f"{key}: {badge} {state_label} | latency {latency:.0f}ms | "
+                    f"last {format_age(last_age)}{subs_text}"
                 )
 
         model_scoring = status_entries.get("model_scoring") or {}
@@ -228,11 +337,7 @@ def render_system_health_panel():
 
 
 def render_live_movers(window_seconds: int, limit: int):
-    movers = MarketQueries.get_movers_window(
-        window_seconds=window_seconds,
-        limit=limit,
-        direction="both",
-    )
+    movers = get_live_movers_balanced(window_seconds=window_seconds, limit=limit)
     if not movers:
         st.info("No live movers yet. Wait for more real-time data.")
         return
@@ -307,6 +412,7 @@ def render_alerts_stream(min_severity: str, limit: int):
         st.info("No alerts matched this severity filter.")
         return
 
+    rows = balance_rows_by_source(rows, limit)
     df = pd.DataFrame(rows)
     st.dataframe(
         df,

@@ -208,6 +208,73 @@ def _fetch_storage_sizes(db_pool) -> dict:
     }
 
 
+def _upsert_polymarket_status(db_pool, status_data: dict) -> None:
+    """Write Polymarket WSS health/status snapshot for dashboard visibility."""
+    db_pool.execute(
+        """
+        INSERT INTO system_status (key, value, updated_at)
+        VALUES ('polymarket_wss', %s, NOW())
+        ON CONFLICT (key) DO UPDATE SET
+            value = EXCLUDED.value,
+            updated_at = NOW()
+        """,
+        (json.dumps(status_data),),
+    )
+
+
+def _effective_subscription_refresh_seconds(asset_count: int) -> int:
+    """
+    Compute a safe refresh cadence based on subscription bootstrap time.
+
+    Large universes take minutes to subscribe; refreshing faster than that
+    causes constant reconnect churn and stale status telemetry.
+    """
+    subscription_chunks = max(1, (asset_count + 19) // 20)
+    estimated_subscribe_seconds = subscription_chunks * 0.2
+    return max(
+        settings.polymarket_subscription_refresh_seconds,
+        int(estimated_subscribe_seconds + 120),
+    )
+
+
+async def _emit_subscription_bootstrap_status(
+    db_pool,
+    client: PolymarketWebSocket,
+    asset_count: int,
+    refresh_interval_seconds: int,
+    start_ts: float,
+) -> None:
+    """
+    Keep polymarket_wss status fresh while connect()+subscribe is in flight.
+
+    Large subscription universes can take minutes before the first event loop
+    heartbeat; emit a lightweight status row so dashboard staleness reflects
+    active bootstrap instead of a stale historical row.
+    """
+    while True:
+        now_ts = time.time()
+        status_data = {
+            "connected": False,
+            "latency_ms": 0.0,
+            "messages_received": 0,
+            "snapshot_inserted_window": 0,
+            "snapshot_skipped_window": 0,
+            "snapshot_inserted_per_min": 0.0,
+            "snapshot_skipped_per_min": 0.0,
+            "subscription_count": client._metrics.current_subscriptions,
+            "subscription_target": asset_count,
+            "refresh_interval_seconds": refresh_interval_seconds,
+            "state": "subscribing",
+            "bootstrap_elapsed_seconds": round(max(0.0, now_ts - start_ts), 1),
+            "last_updated": now_ts,
+        }
+        try:
+            _upsert_polymarket_status(db_pool, status_data)
+        except Exception as e:
+            logger.debug("Failed to update bootstrap status: %s", e)
+        await asyncio.sleep(5.0)
+
+
 async def run_wss_loop(shutdown: Shutdown) -> None:
     """
     Main WSS loop with:
@@ -236,7 +303,13 @@ async def run_wss_loop(shutdown: Shutdown) -> None:
             last_written_spread,
         ) = await asyncio.to_thread(_load_active_asset_state, db_pool)
 
-        asset_ids = list(source_to_db_token.keys())
+        # Prioritize assets with the most recent persisted activity first so
+        # the first subscription chunk is more likely to emit live events.
+        asset_ids = sorted(
+            source_to_db_token.keys(),
+            key=lambda token: last_written_ts.get(token, 0.0),
+            reverse=True,
+        )
         if not asset_ids:
             logger.warning("No active Polymarket assets available; retrying in 30s")
             await asyncio.sleep(30)
@@ -264,6 +337,11 @@ async def run_wss_loop(shutdown: Shutdown) -> None:
 
         needs_subscription_refresh = False
         last_subscription_refresh = time.time()
+        refresh_reason: Optional[str] = None
+
+        # Refreshing 30k+ subscriptions takes minutes; avoid refresh cadence shorter
+        # than the bootstrap + stabilization time.
+        effective_refresh_seconds = _effective_subscription_refresh_seconds(len(asset_ids))
 
         def _track_alert_task(task: asyncio.Task) -> None:
             alert_tasks.add(task)
@@ -280,12 +358,57 @@ async def run_wss_loop(shutdown: Shutdown) -> None:
             task.add_done_callback(_on_done)
 
         try:
-            await client.connect(asset_ids)
+            bootstrap_start_ts = time.time()
+            bootstrap_status_task = asyncio.create_task(
+                _emit_subscription_bootstrap_status(
+                    db_pool,
+                    client,
+                    len(asset_ids),
+                    effective_refresh_seconds,
+                    bootstrap_start_ts,
+                )
+            )
+            try:
+                await client.connect(asset_ids)
+            finally:
+                if bootstrap_status_task and not bootstrap_status_task.done():
+                    bootstrap_status_task.cancel()
+                    try:
+                        await bootstrap_status_task
+                    except asyncio.CancelledError:
+                        pass
+            last_subscription_refresh = time.time()
+            last_status_flush = 0.0
             consecutive_failures = 0
             logger.info(
                 f"WSS connected, starting message loop "
-                f"(watchdog={settings.wss_watchdog_timeout}s)"
+                f"(watchdog={settings.wss_watchdog_timeout}s, "
+                f"refresh={effective_refresh_seconds}s)"
             )
+            try:
+                _upsert_polymarket_status(
+                    db_pool,
+                    {
+                        "connected": True,
+                        "latency_ms": 0.0,
+                        "messages_received": 0,
+                        "snapshot_inserted_window": inserted_since_window,
+                        "snapshot_skipped_window": skipped_since_window,
+                        "snapshot_inserted_per_min": 0.0,
+                        "snapshot_skipped_per_min": 0.0,
+                        "subscription_count": client._metrics.current_subscriptions,
+                        "subscription_target": len(asset_ids),
+                        "refresh_interval_seconds": effective_refresh_seconds,
+                        "state": (
+                            "subscribing"
+                            if client.is_subscription_in_progress
+                            else "streaming"
+                        ),
+                        "last_updated": time.time(),
+                    },
+                )
+            except Exception as e:
+                logger.warning(f"Failed to write initial Polymarket WSS status: {e}")
 
             listen_iter = client.listen().__aiter__()
             while not shutdown.is_set:
@@ -298,6 +421,32 @@ async def run_wss_loop(shutdown: Shutdown) -> None:
                     logger.warning("WSS listen() iterator exhausted")
                     break
                 except asyncio.TimeoutError:
+                    subscription_error = client.pop_subscription_error()
+                    if subscription_error:
+                        raise ConnectionError(
+                            f"Subscription bootstrap failed: {subscription_error}"
+                        )
+
+                    if client.is_subscription_in_progress:
+                        logger.warning(
+                            "Watchdog timeout during subscription bootstrap "
+                            "(%s/%s assets subscribed); continuing",
+                            client._metrics.current_subscriptions,
+                            client.subscription_target,
+                        )
+                        continue
+
+                    last_activity = client._metrics.last_message_time
+                    if last_activity and (
+                        (time.time() - last_activity) < settings.wss_watchdog_timeout
+                    ):
+                        logger.debug(
+                            "Watchdog timeout ignored due recent socket activity "
+                            "(idle=%.1fs)",
+                            time.time() - last_activity,
+                        )
+                        continue
+
                     logger.error(
                         "WSS watchdog timeout: no messages received for "
                         f"{settings.wss_watchdog_timeout}s"
@@ -393,12 +542,16 @@ async def run_wss_loop(shutdown: Shutdown) -> None:
                         event.market_id,
                         event.outcome,
                     )
-                    needs_subscription_refresh = True
+                    # Defer reconnect to the periodic refresh window.
+                    # Immediate reconnect on event bursts causes subscription churn.
+                    refresh_reason = refresh_reason or "market_resolved"
 
                 elif isinstance(event, NewMarket):
                     logger.info(f"New Market: {event.market_id} with {len(event.tokens)} tokens")
                     await asyncio.to_thread(_sync_polymarket_markets_once)
-                    needs_subscription_refresh = True
+                    # Defer reconnect to the periodic refresh window.
+                    # Immediate reconnect on event bursts causes subscription churn.
+                    refresh_reason = refresh_reason or "new_market"
 
                 if hasattr(event, "timestamp") and event.timestamp:
                     try:
@@ -436,9 +589,10 @@ async def run_wss_loop(shutdown: Shutdown) -> None:
                 # Subscription refresh for closed/resolved/new markets.
                 if (
                     now_ts - last_subscription_refresh
-                    >= settings.polymarket_subscription_refresh_seconds
+                    >= effective_refresh_seconds
                 ):
                     needs_subscription_refresh = True
+                    refresh_reason = refresh_reason or "periodic"
 
                 if needs_subscription_refresh:
                     if pending_updates:
@@ -453,7 +607,31 @@ async def run_wss_loop(shutdown: Shutdown) -> None:
                         )
                         inserted_since_window += inserted
                         skipped_since_window += skipped
-                    logger.info("Refreshing Polymarket WSS subscription universe")
+                    logger.info(
+                        "Refreshing Polymarket WSS subscription universe (reason=%s)",
+                        refresh_reason or "unknown",
+                    )
+                    try:
+                        _upsert_polymarket_status(
+                            db_pool,
+                            {
+                                "connected": True,
+                                "latency_ms": round(latest_latency_ms, 2),
+                                "messages_received": messages_since_last_health,
+                                "snapshot_inserted_window": inserted_since_window,
+                                "snapshot_skipped_window": skipped_since_window,
+                                "snapshot_inserted_per_min": 0.0,
+                                "snapshot_skipped_per_min": 0.0,
+                                "subscription_count": client._metrics.current_subscriptions,
+                                "subscription_target": len(asset_ids),
+                                "refresh_interval_seconds": effective_refresh_seconds,
+                                "state": "refreshing",
+                                "refresh_reason": refresh_reason,
+                                "last_updated": now_ts,
+                            },
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to update refresh status: {e}")
                     break
 
                 if now_ts - last_status_flush > 5.0:
@@ -468,6 +646,14 @@ async def run_wss_loop(shutdown: Shutdown) -> None:
                         "snapshot_skipped_window": skipped_since_window,
                         "snapshot_inserted_per_min": round(inserted_since_window * per_min_scale, 2),
                         "snapshot_skipped_per_min": round(skipped_since_window * per_min_scale, 2),
+                        "subscription_count": client._metrics.current_subscriptions,
+                        "subscription_target": len(asset_ids),
+                        "refresh_interval_seconds": effective_refresh_seconds,
+                        "state": (
+                            "subscribing"
+                            if client.is_subscription_in_progress
+                            else "streaming"
+                        ),
                         "last_updated": now_ts,
                     }
 
@@ -476,16 +662,7 @@ async def run_wss_loop(shutdown: Shutdown) -> None:
                         last_storage_metrics = now_ts
 
                     try:
-                        db_pool.execute(
-                            """
-                            INSERT INTO system_status (key, value, updated_at)
-                            VALUES ('polymarket_wss', %s, NOW())
-                            ON CONFLICT (key) DO UPDATE SET
-                                value = EXCLUDED.value,
-                                updated_at = NOW()
-                            """,
-                            (json.dumps(status_data),),
-                        )
+                        _upsert_polymarket_status(db_pool, status_data)
                         last_status_flush = now_ts
                     except Exception as e:
                         logger.warning(f"Failed to update system status: {e}")
@@ -500,7 +677,8 @@ async def run_wss_loop(shutdown: Shutdown) -> None:
                     msgs_per_min = (messages_since_last_health / elapsed) * 60 if elapsed > 0 else 0
                     logger.info(
                         f"WSS Health: {messages_since_last_health} msgs in {elapsed:.0f}s "
-                        f"({msgs_per_min:.1f}/min), subscriptions={len(asset_ids)}"
+                        f"({msgs_per_min:.1f}/min), subscriptions="
+                        f"{client._metrics.current_subscriptions}/{len(asset_ids)}"
                     )
                     last_health_log = now_ts
                     messages_since_last_health = 0
@@ -512,6 +690,27 @@ async def run_wss_loop(shutdown: Shutdown) -> None:
 
         except Exception as e:
             logger.error(f"WSS Loop Error: {e}")
+            try:
+                _upsert_polymarket_status(
+                    db_pool,
+                    {
+                        "connected": False,
+                        "latency_ms": 0.0,
+                        "messages_received": 0,
+                        "snapshot_inserted_window": 0,
+                        "snapshot_skipped_window": 0,
+                        "snapshot_inserted_per_min": 0.0,
+                        "snapshot_skipped_per_min": 0.0,
+                        "subscription_count": client._metrics.current_subscriptions,
+                        "subscription_target": len(asset_ids),
+                        "refresh_interval_seconds": effective_refresh_seconds,
+                        "state": "error",
+                        "last_error": str(e),
+                        "last_updated": time.time(),
+                    },
+                )
+            except Exception:
+                pass
             consecutive_failures += 1
 
             if consecutive_failures >= settings.wss_max_reconnect_attempts:
@@ -526,6 +725,22 @@ async def run_wss_loop(shutdown: Shutdown) -> None:
                     while not shutdown.is_set:
                         try:
                             await sync_once()
+                            _upsert_polymarket_status(
+                                db_pool,
+                                {
+                                    "connected": False,
+                                    "latency_ms": 0.0,
+                                    "messages_received": 0,
+                                    "snapshot_inserted_window": 0,
+                                    "snapshot_skipped_window": 0,
+                                    "snapshot_inserted_per_min": 0.0,
+                                    "snapshot_skipped_per_min": 0.0,
+                                    "subscription_count": 0,
+                                    "refresh_interval_seconds": effective_refresh_seconds,
+                                    "state": "polling_fallback",
+                                    "last_updated": time.time(),
+                                },
+                            )
                         except Exception as poll_err:
                             logger.exception(f"Fallback polling error: {poll_err}")
                         await asyncio.sleep(settings.sync_interval_seconds)

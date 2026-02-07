@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import time
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, Optional
@@ -41,6 +42,24 @@ def get_sync_state() -> KalshiSyncState:
     if _sync_state is None:
         _sync_state = KalshiSyncState()
     return _sync_state
+
+
+def _upsert_kalshi_status(status_data: dict) -> None:
+    """Best-effort status write for Kalshi REST polling path."""
+    try:
+        db = get_db_pool()
+        db.execute(
+            """
+            INSERT INTO system_status (key, value, updated_at)
+            VALUES ('kalshi_wss', %s, NOW())
+            ON CONFLICT (key) DO UPDATE SET
+                value = EXCLUDED.value,
+                updated_at = NOW()
+            """,
+            (json.dumps(status_data),),
+        )
+    except Exception as e:
+        logger.debug("Failed to upsert kalshi status: %s", e)
 
 
 def _normalize_resolved_outcome(value: Optional[str]) -> Optional[str]:
@@ -273,7 +292,22 @@ async def sync_once() -> None:
         if needs_market_sync:
             sync_markets(adapter)
         
-        sync_prices(adapter)
+        snapshots_inserted = sync_prices(adapter)
+        _upsert_kalshi_status(
+            {
+                "connected": False,
+                "state": "polling_sync",
+                "messages_received": 0,
+                "trades_received": 0,
+                "subscription_count": len(state.ticker_to_token_id),
+                "snapshot_inserted_window": snapshots_inserted,
+                "snapshot_skipped_window": 0,
+                "snapshot_inserted_per_min": 0.0,
+                "snapshot_skipped_per_min": 0.0,
+                "latency_ms": 0.0,
+                "last_updated": time.time(),
+            }
+        )
         
     except Exception as e:
         logger.error(f"Kalshi sync error: {e}")

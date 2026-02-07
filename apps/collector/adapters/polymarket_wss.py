@@ -53,7 +53,32 @@ class PolymarketWebSocket:
         self._websocket: Optional[websockets.WebSocketClientProtocol] = None
         self._subscribed_assets: set[str] = set()
         self._keepalive_task: Optional[asyncio.Task] = None
+        self._subscription_task: Optional[asyncio.Task] = None
+        self._subscription_target: int = 0
+        self._subscription_error: Optional[str] = None
         self._enable_custom_features = enable_custom_features
+
+    @property
+    def is_subscription_in_progress(self) -> bool:
+        return bool(self._subscription_task and not self._subscription_task.done())
+
+    @property
+    def subscription_target(self) -> int:
+        return self._subscription_target
+
+    def pop_subscription_error(self) -> Optional[str]:
+        err = self._subscription_error
+        self._subscription_error = None
+        return err
+
+    async def _cancel_subscription_task(self) -> None:
+        if self._subscription_task and not self._subscription_task.done():
+            self._subscription_task.cancel()
+            try:
+                await self._subscription_task
+            except asyncio.CancelledError:
+                pass
+        self._subscription_task = None
     
     async def connect(self, asset_ids: list[str]) -> None:
         """Connect and subscribe to MARKET channel."""
@@ -67,9 +92,13 @@ class PolymarketWebSocket:
             except asyncio.CancelledError:
                 pass
             self._keepalive_task = None
-        
+
+        await self._cancel_subscription_task()
+
         # Clear subscribed assets for fresh subscription
         self._subscribed_assets.clear()
+        self._subscription_target = 0
+        self._subscription_error = None
         
         try:
             # Polymarket use application-level PING/PONG, so we disable protocol pings
@@ -85,7 +114,9 @@ class PolymarketWebSocket:
             self._keepalive_task = asyncio.create_task(self._keepalive())
             
             if asset_ids:
-                await self.subscribe_assets(asset_ids)
+                # Subscribe first chunk immediately and continue the rest in
+                # background so the message loop can start quickly.
+                await self.subscribe_assets(asset_ids, background=True)
                 
         except Exception as e:
             logger.error(f"Failed to connect to WSS: {e}")
@@ -109,7 +140,47 @@ class PolymarketWebSocket:
                 # Any error (AttributeError, ConnectionClosed, etc) -> stop keepalive
                 break
 
-    async def subscribe_assets(self, asset_ids: list[str]) -> None:
+    async def _send_subscription_chunk(self, chunk: list[str], is_initial: bool) -> None:
+        if not self._websocket:
+            raise RuntimeError("WebSocket not connected")
+
+        if is_initial:
+            message = {"assets_ids": chunk, "type": "market"}
+        else:
+            message = {"assets_ids": chunk, "operation": "subscribe"}
+
+        if self._enable_custom_features:
+            message["custom_feature_enabled"] = True
+
+        await self._websocket.send(json.dumps(message))
+        self._subscribed_assets.update(chunk)
+        self._metrics.current_subscriptions = len(self._subscribed_assets)
+        await asyncio.sleep(0.2)
+
+    async def _subscribe_remaining_chunks(self, chunks: list[list[str]]) -> None:
+        total_chunks = len(chunks)
+        try:
+            for idx, chunk in enumerate(chunks, start=1):
+                await self._send_subscription_chunk(chunk, is_initial=False)
+                if idx == 1 or idx % 100 == 0 or idx == total_chunks:
+                    logger.info(
+                        "Polymarket subscribe progress: %s/%s assets",
+                        len(self._subscribed_assets),
+                        self._subscription_target,
+                    )
+            logger.info(
+                "Successfully subscribed to %s assets",
+                len(self._subscribed_assets),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self._subscription_error = str(e)
+            logger.warning("Background subscription failed: %s", e)
+        finally:
+            self._subscription_task = None
+
+    async def subscribe_assets(self, asset_ids: list[str], background: bool = False) -> None:
         """
         Subscribe to assets with optional custom features.
         
@@ -139,39 +210,40 @@ class PolymarketWebSocket:
         logger.info(f"Subscribing to {len(asset_ids)} assets in {total_chunks} chunks{features_note}")
         
         is_first_subscription = len(self._subscribed_assets) == 0
-        
-        for chunk_idx, i in enumerate(range(0, len(asset_ids), chunk_size)):
-            chunk = [str(a) for a in asset_ids[i:i + chunk_size]]
-            
-            if is_first_subscription and chunk_idx == 0:
-                # First subscription establishes the market channel
-                message = {
-                    "assets_ids": chunk,
-                    "type": "market"
-                }
-                # Enable custom features for spread, new markets, and resolutions
-                if self._enable_custom_features:
-                    message["custom_feature_enabled"] = True
-                logger.debug(f"Sending initial subscription (type=market, custom={self._enable_custom_features})")
+        chunks: list[list[str]] = [
+            [str(a) for a in asset_ids[i:i + chunk_size]]
+            for i in range(0, len(asset_ids), chunk_size)
+        ]
+        self._subscription_target = max(self._subscription_target, len(asset_ids))
+
+        start_idx = 0
+        if is_first_subscription:
+            await self._send_subscription_chunk(chunks[0], is_initial=True)
+            start_idx = 1
+
+        if background:
+            await self._cancel_subscription_task()
+            remaining = chunks[start_idx:]
+            if remaining:
+                self._subscription_task = asyncio.create_task(
+                    self._subscribe_remaining_chunks(remaining)
+                )
+                logger.info(
+                    "Background subscription active: %s/%s assets",
+                    len(self._subscribed_assets),
+                    self._subscription_target,
+                )
             else:
-                # Subsequent subscriptions use operation: subscribe
-                message = {
-                    "assets_ids": chunk,
-                    "operation": "subscribe"
-                }
-                # Custom features should persist from initial subscription,
-                # but include it anyway for safety
-                if self._enable_custom_features:
-                    message["custom_feature_enabled"] = True
-                
-            await self._websocket.send(json.dumps(message))
-            
-            # Rate limit: 200ms delay between chunks to be safe
-            await asyncio.sleep(0.2)
-            
-        self._subscribed_assets.update(asset_ids)
-        self._metrics.current_subscriptions = len(self._subscribed_assets)
-        logger.info(f"Successfully subscribed to {len(asset_ids)} assets")
+                logger.info(
+                    "Successfully subscribed to %s assets",
+                    len(self._subscribed_assets),
+                )
+            return
+
+        for chunk in chunks[start_idx:]:
+            await self._send_subscription_chunk(chunk, is_initial=False)
+
+        logger.info(f"Successfully subscribed to {len(self._subscribed_assets)} assets")
 
     async def listen(self) -> AsyncIterator[WSSEvent]:
         """
@@ -196,6 +268,10 @@ class PolymarketWebSocket:
 
         try:
             async for message in self._websocket:
+                # Track any inbound activity (including control/ack messages)
+                # to avoid false watchdog reconnects during subscription bootstrap.
+                self._metrics.last_message_time = time.time()
+
                 # Handle application-level PONG (text message)
                 if isinstance(message, str) and "PONG" in message:
                      logger.debug(f"Received WSS PONG/Control: {message}")
@@ -272,6 +348,8 @@ class PolymarketWebSocket:
             except asyncio.CancelledError:
                 pass
             self._keepalive_task = None
+
+        await self._cancel_subscription_task()
         
         if self._websocket:
             try:

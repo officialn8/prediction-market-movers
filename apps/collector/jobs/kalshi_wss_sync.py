@@ -65,6 +65,38 @@ class KalshiWSSSync:
         self._inserted_since_window = 0
         self._skipped_since_window = 0
 
+    async def _subscribe_in_chunks(
+        self,
+        tickers: list[str],
+        subscribe_fn,
+        channel_name: str,
+        chunk_size: int,
+    ) -> int:
+        """Subscribe in chunks to avoid oversized payloads and throttling."""
+        if not tickers:
+            return 0
+
+        total = len(tickers)
+        chunk_count = (total + chunk_size - 1) // chunk_size
+        subscribed = 0
+
+        for chunk_idx, start in enumerate(range(0, total, chunk_size), start=1):
+            chunk = tickers[start:start + chunk_size]
+            await subscribe_fn(chunk)
+            subscribed += len(chunk)
+
+            if chunk_idx == 1 or chunk_idx % 5 == 0 or chunk_idx == chunk_count:
+                logger.info(
+                    "Kalshi %s subscribe progress: %s/%s markets",
+                    channel_name,
+                    subscribed,
+                    total,
+                )
+
+            await asyncio.sleep(0.05)
+
+        return subscribed
+
     def _track_alert_task(self, task: asyncio.Task) -> None:
         self._alert_tasks.add(task)
 
@@ -163,7 +195,27 @@ class KalshiWSSSync:
             logger.warning("No Kalshi markets found to subscribe to")
             return 0
 
-        await self.wss.subscribe_trades(tickers)
+        await self._subscribe_in_chunks(
+            tickers=tickers,
+            subscribe_fn=self.wss.subscribe_trades,
+            channel_name="trades",
+            chunk_size=1500,
+        )
+
+        try:
+            await self._subscribe_in_chunks(
+                tickers=tickers,
+                subscribe_fn=self.wss.subscribe_orderbook,
+                channel_name="orderbook",
+                chunk_size=1000,
+            )
+        except Exception as e:
+            # Keep trades stream alive even if orderbook subscribe fails.
+            logger.warning(
+                "Kalshi orderbook subscription failed; continuing trades-only: %s",
+                e,
+            )
+
         logger.info(f"Subscribed to {len(tickers)} Kalshi markets via WSS")
         return len(tickers)
 
@@ -254,6 +306,7 @@ class KalshiWSSSync:
                 "latency_ms": round(self._latest_latency_ms, 2),
                 "messages_received": self._messages_received,
                 "trades_received": self._trades_received,
+                "subscription_count": len(self.ticker_to_token_id),
                 "snapshot_inserted_window": self._inserted_since_window,
                 "snapshot_skipped_window": self._skipped_since_window,
                 "snapshot_inserted_per_min": round(self._inserted_since_window * per_min_scale, 2),

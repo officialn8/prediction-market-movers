@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from apps.collector.adapters.kalshi_wss import KalshiTrade
-from apps.collector.adapters.wss_messages import PriceUpdate, TradeEvent
+from apps.collector.adapters.wss_messages import NewMarket, PriceUpdate, TradeEvent
 from apps.collector.jobs import kalshi_wss_sync, polymarket_wss_sync
 from packages.core.settings import settings
 from packages.core.storage import queries
@@ -146,12 +146,24 @@ async def test_polymarket_trade_passes_volume_to_instant_mover(monkeypatch):
     monkeypatch.setattr(polymarket_wss_sync, "check_instant_mover", _fake_check)
 
     class _Metrics:
+        def __init__(self):
+            self.current_subscriptions = 1
+            self.last_message_time = 0.0
+
         def save(self):
             return None
 
     class _FakeClient:
         def __init__(self, enable_custom_features=True):
             self._metrics = _Metrics()
+            self.subscription_target = 1
+
+        @property
+        def is_subscription_in_progress(self):
+            return False
+
+        def pop_subscription_error(self):
+            return None
 
         async def connect(self, _asset_ids):
             return None
@@ -322,3 +334,109 @@ def test_polymarket_wss_sync_uses_light_sync_when_full_not_due(monkeypatch):
 
     assert calls["full"] == 0
     assert calls["light"] == 1
+
+
+def test_polymarket_refresh_interval_scales_for_large_subscriptions(monkeypatch):
+    monkeypatch.setattr(
+        polymarket_wss_sync.settings,
+        "polymarket_subscription_refresh_seconds",
+        300,
+    )
+
+    # 32,050 assets -> 1,603 chunks -> ~320.6s subscription + 120s buffer.
+    effective = polymarket_wss_sync._effective_subscription_refresh_seconds(32050)
+    assert effective >= 440
+    assert effective > 300
+
+
+@pytest.mark.asyncio
+async def test_polymarket_new_market_event_does_not_force_immediate_reconnect(monkeypatch):
+    fake_db = QueryCaptureDB()
+    monkeypatch.setattr(polymarket_wss_sync, "get_db_pool", lambda: fake_db)
+
+    sync_calls = {"count": 0}
+
+    def _fake_sync():
+        sync_calls["count"] += 1
+
+    monkeypatch.setattr(polymarket_wss_sync, "_sync_polymarket_markets_once", _fake_sync)
+    monkeypatch.setattr(
+        polymarket_wss_sync,
+        "_load_active_asset_state",
+        lambda _db: (
+            {"pm-token": "00000000-0000-0000-0000-000000000111"},
+            {"pm-token": 0.50},
+            {},
+            {},
+            {},
+        ),
+    )
+
+    shutdown = polymarket_wss_sync.Shutdown()
+
+    async def _fake_check(_token_id, _old_price, _new_price, volume=None, **_kwargs):
+        shutdown.is_set = True
+        return None
+
+    monkeypatch.setattr(polymarket_wss_sync, "check_instant_mover", _fake_check)
+
+    connect_calls = {"count": 0}
+
+    class _Metrics:
+        def __init__(self):
+            self.current_subscriptions = 1
+            self.last_message_time = 0.0
+
+        def save(self):
+            return None
+
+    class _FakeClient:
+        def __init__(self, enable_custom_features=True):
+            self._metrics = _Metrics()
+            self.subscription_target = 1
+
+        @property
+        def is_subscription_in_progress(self):
+            return False
+
+        def pop_subscription_error(self):
+            return None
+
+        async def connect(self, _asset_ids):
+            connect_calls["count"] += 1
+
+        async def close(self):
+            return None
+
+        def listen(self):
+            async def _gen():
+                yield NewMarket(
+                    market_id="pm-market-1",
+                    condition_id="pm-cond-1",
+                    tokens=[{"token_id": "pm-token", "outcome": "YES"}],
+                    timestamp=datetime.now(timezone.utc),
+                )
+                yield TradeEvent(
+                    token_id="pm-token",
+                    price=0.55,
+                    size=100.0,
+                    side="BUY",
+                    fee_rate_bps=None,
+                    timestamp=datetime.now(timezone.utc),
+                )
+
+            return _gen()
+
+    monkeypatch.setattr(polymarket_wss_sync, "PolymarketWebSocket", _FakeClient)
+    monkeypatch.setattr(
+        polymarket_wss_sync.settings,
+        "polymarket_subscription_refresh_seconds",
+        600,
+    )
+
+    await polymarket_wss_sync.run_wss_loop(shutdown)
+
+    # 1 initial sync + 1 sync triggered by NewMarket event.
+    assert sync_calls["count"] == 2
+    # No immediate reconnect loop: only one connect call occurred.
+    assert connect_calls["count"] == 1
