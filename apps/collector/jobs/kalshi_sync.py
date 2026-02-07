@@ -77,8 +77,11 @@ def _map_market_status(status: Optional[str]) -> str:
     text = str(status or "").strip().lower()
     if text in {"settled", "resolved"}:
         return "resolved"
-    if text == "active":
+    # Kalshi API uses "open" for tradable markets.
+    if text in {"active", "open", "trading"}:
         return "active"
+    if text in {"closed", "inactive", "expired"}:
+        return "closed"
     return "closed"
 
 
