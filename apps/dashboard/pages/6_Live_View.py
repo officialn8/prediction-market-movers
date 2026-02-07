@@ -107,11 +107,23 @@ def get_system_status_entries() -> dict:
     return entries
 
 
-def get_live_tape(seconds: int, limit: int) -> list[dict]:
+def _normalize_source_filter(source: str | None) -> str | None:
+    if not source:
+        return None
+    normalized = source.strip().lower()
+    if normalized in {"polymarket", "kalshi"}:
+        return normalized
+    return None
+
+
+def get_live_tape(seconds: int, limit: int, source: str | None = None) -> list[dict]:
     """Fetch latest per-token snapshots within the time window."""
     db = get_db_pool()
     sample_limit = max(limit * 20, 400)
-    query = """
+    source_filter = _normalize_source_filter(source)
+    source_clause = "AND m.source = %s" if source_filter else ""
+
+    query = f"""
         WITH latest AS (
             SELECT DISTINCT ON (s.token_id)
                 s.token_id,
@@ -136,10 +148,17 @@ def get_live_tape(seconds: int, limit: int) -> list[dict]:
         JOIN market_tokens mt ON l.token_id = mt.token_id
         JOIN markets m ON mt.market_id = m.market_id
         WHERE l.ts > NOW() - (%s * INTERVAL '1 second')
+        {source_clause}
         ORDER BY l.ts DESC
         LIMIT %s
     """
-    rows = db.execute(query, (seconds, sample_limit), fetch=True) or []
+    params: list[object] = [seconds]
+    if source_filter:
+        params.append(source_filter)
+    params.append(sample_limit)
+    rows = db.execute(query, tuple(params), fetch=True) or []
+    if source_filter:
+        return rows[:limit]
     return balance_rows_by_source(rows, limit)
 
 
@@ -216,6 +235,19 @@ def get_live_movers_balanced(window_seconds: int, limit: int) -> list[dict]:
 
     selected.sort(key=_move_strength, reverse=True)
     return selected[:limit]
+
+
+def get_live_movers(window_seconds: int, limit: int, source: str | None = None) -> list[dict]:
+    """Fetch movers for a specific venue, or balanced across venues."""
+    source_filter = _normalize_source_filter(source)
+    if source_filter:
+        return MarketQueries.get_movers_window(
+            window_seconds=window_seconds,
+            limit=limit,
+            direction="both",
+            source=source_filter,
+        )
+    return get_live_movers_balanced(window_seconds=window_seconds, limit=limit)
 
 
 def format_age(age_seconds: float | None) -> str:
@@ -336,19 +368,25 @@ def render_system_health_panel():
                 st.caption(f"Score date: {score_date} | no resolved samples scored yet")
 
 
-def render_live_movers(window_seconds: int, limit: int):
-    movers = get_live_movers_balanced(window_seconds=window_seconds, limit=limit)
+def render_live_movers(window_seconds: int, limit: int, source: str | None = None):
+    movers = get_live_movers(window_seconds=window_seconds, limit=limit, source=source)
     if not movers:
-        st.info("No live movers yet. Wait for more real-time data.")
+        if source:
+            st.info(f"No recent {source.title()} movers yet.")
+        else:
+            st.info("No live movers yet. Wait for more real-time data.")
         return
     for mover in movers:
         render_mover_card(mover, show_watchlist=False)
 
 
-def render_live_tape(seconds: int, limit: int):
-    rows = get_live_tape(seconds, limit)
+def render_live_tape(seconds: int, limit: int, source: str | None = None):
+    rows = get_live_tape(seconds, limit, source=source)
     if not rows:
-        st.info("No recent snapshots yet.")
+        if source:
+            st.info(f"No recent {source.title()} snapshots yet.")
+        else:
+            st.info("No recent snapshots yet.")
         return
 
     df = pd.DataFrame(rows)
@@ -509,14 +547,14 @@ def main():
             value=120,
             format_func=lambda v: f"{v}s",
         )
-        movers_limit = st.slider("Movers to show", 5, 50, 20)
+        movers_limit = st.slider("Movers per source", 5, 50, 20)
         tape_window = st.select_slider(
             "Tape window",
             options=[60, 120, 300, 600],
             value=300,
             format_func=lambda v: f"{v}s",
         )
-        tape_limit = st.slider("Tape rows", 10, 200, 60)
+        tape_limit = st.slider("Tape rows per source", 10, 200, 60)
 
         st.markdown("---")
         st.markdown("### Volume Spikes")
@@ -549,13 +587,24 @@ def main():
     render_system_health_panel()
     st.markdown("---")
 
-    col1, col2 = st.columns([2, 3])
-    with col1:
-        st.subheader("⚡ Live Movers")
-        render_live_movers(movers_window, movers_limit)
-    with col2:
-        st.subheader("🧾 Snapshot Tape")
-        render_live_tape(tape_window, tape_limit)
+    st.subheader("⚡ Live Movers")
+    movers_col1, movers_col2 = st.columns(2)
+    with movers_col1:
+        st.markdown("**Polymarket**")
+        render_live_movers(movers_window, movers_limit, source="polymarket")
+    with movers_col2:
+        st.markdown("**Kalshi**")
+        render_live_movers(movers_window, movers_limit, source="kalshi")
+
+    st.markdown("---")
+    st.subheader("🧾 Snapshot Tape")
+    tape_col1, tape_col2 = st.columns(2)
+    with tape_col1:
+        st.markdown("**Polymarket**")
+        render_live_tape(tape_window, tape_limit, source="polymarket")
+    with tape_col2:
+        st.markdown("**Kalshi**")
+        render_live_tape(tape_window, tape_limit, source="kalshi")
 
     st.markdown("---")
     col3, col4 = st.columns([2, 3])
