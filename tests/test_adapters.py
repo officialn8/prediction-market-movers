@@ -2,7 +2,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from apps.collector.adapters.polymarket import PolymarketAdapter, PolymarketMarket
+from apps.collector.adapters.polymarket import (
+    PolymarketAdapter,
+    PolymarketMarket,
+    build_canonical_polymarket_url,
+)
 
 
 @pytest.fixture
@@ -49,6 +53,62 @@ def test_parse_market_invalid_missing_id(adapter):
     }
     market = adapter._parse_market(raw_data)
     assert market is None
+
+
+def test_build_canonical_polymarket_url_prefers_two_segment():
+    url = build_canonical_polymarket_url(
+        event_slug="nba-mvp-694",
+        market_slug="will-lebron-james-win-the-20252026-nba-mvp",
+    )
+    assert (
+        url
+        == "https://polymarket.com/event/nba-mvp-694/will-lebron-james-win-the-20252026-nba-mvp"
+    )
+
+
+def test_build_canonical_polymarket_url_from_event_path():
+    url = build_canonical_polymarket_url(
+        event_slug=None,
+        market_slug=None,
+        event_url="https://polymarket.com/event/negative-gdp-growth-in-2025?tid=123",
+    )
+    assert url == "https://polymarket.com/event/negative-gdp-growth-in-2025"
+
+
+def test_parse_market_with_missing_slug_has_no_url(adapter):
+    raw_data = {
+        "condition_id": "0xabc123",
+        "question": "Will this parse without URL?",
+        "active": True,
+        "closed": False,
+        "clobTokenIds": ["T1", "T2"],
+        "outcomes": ["Yes", "No"],
+        "outcomePrices": ["0.5", "0.5"],
+    }
+    market = adapter._parse_market(raw_data)
+    assert market is not None
+    assert market.event_url is None
+    assert market.url == ""
+
+
+def test_parse_market_uses_two_segment_canonical_url(adapter):
+    raw_data = {
+        "condition_id": "0xdeadbeef",
+        "question": "Will LeBron win MVP?",
+        "slug": "will-lebron-james-win-the-20252026-nba-mvp",
+        "event_slug": "nba-mvp-694",
+        "active": True,
+        "closed": False,
+        "clobTokenIds": ["T1", "T2"],
+        "outcomes": ["Yes", "No"],
+        "outcomePrices": ["0.5", "0.5"],
+    }
+    market = adapter._parse_market(raw_data)
+    assert market is not None
+    assert (
+        market.url
+        == "https://polymarket.com/event/nba-mvp-694/will-lebron-james-win-the-20252026-nba-mvp"
+    )
 
 
 @patch("apps.collector.adapters.polymarket.requests.Session")

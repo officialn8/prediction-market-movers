@@ -35,16 +35,17 @@ async def calculate_market_stats() -> int:
     logger.info("Starting market stats calculation...")
     db = get_db_pool()
     
-    # Get all active tokens with sufficient history
+    # Get all active tokens with sufficient hourly history
     tokens = db.execute("""
         SELECT DISTINCT mt.token_id
         FROM market_tokens mt
         JOIN markets m ON mt.market_id = m.market_id
         WHERE m.status = 'active'
           AND EXISTS (
-              SELECT 1 FROM snapshots s 
-              WHERE s.token_id = mt.token_id 
-              AND s.ts > NOW() - INTERVAL '%s days'
+              SELECT 1
+              FROM ohlc_1h h
+              WHERE h.token_id = mt.token_id
+                AND h.bucket_ts > NOW() - INTERVAL '%s days'
           )
     """, (LOOKBACK_DAYS,), fetch=True) or []
     
@@ -75,40 +76,22 @@ def _calculate_token_stats(token_id: str, lookback_days: int) -> Optional[Dict]:
     """Calculate volatility stats for a single token."""
     db = get_db_pool()
     
-    # Get hourly price samples (using OHLC or snapshots)
+    # Use retained hourly candles so price-volatility stats are decoupled from snapshots.
     samples = db.execute("""
-        WITH hourly_prices AS (
-            SELECT 
-                date_trunc('hour', ts) as hour_ts,
-                FIRST_VALUE(price) OVER (
-                    PARTITION BY date_trunc('hour', ts) 
-                    ORDER BY ts ASC
-                ) as open_price,
-                LAST_VALUE(price) OVER (
-                    PARTITION BY date_trunc('hour', ts) 
-                    ORDER BY ts ASC
-                    ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
-                ) as close_price,
-                volume_24h
-            FROM snapshots
-            WHERE token_id = %s
-              AND ts > NOW() - INTERVAL '%s days'
-        ),
-        distinct_hours AS (
-            SELECT DISTINCT ON (hour_ts)
-                hour_ts,
-                open_price,
-                close_price,
-                volume_24h
-            FROM hourly_prices
-            ORDER BY hour_ts, open_price
-        )
         SELECT 
+            bucket_ts as hour_ts,
             open_price,
             close_price,
-            volume_24h,
-            LAG(close_price) OVER (ORDER BY hour_ts) as prev_close
-        FROM distinct_hours
+            LAG(close_price) OVER (ORDER BY bucket_ts) as prev_close
+        FROM (
+            SELECT
+                bucket_ts,
+                open as open_price,
+                close as close_price
+            FROM ohlc_1h
+            WHERE token_id = %s
+              AND bucket_ts > NOW() - INTERVAL '%s days'
+        ) h
         ORDER BY hour_ts
     """, (token_id, lookback_days), fetch=True) or []
     
@@ -118,12 +101,9 @@ def _calculate_token_stats(token_id: str, lookback_days: int) -> Optional[Dict]:
     # Calculate move statistics
     moves_pp = []
     log_odds_changes = []
-    volumes = []
-    
     for s in samples:
         prev_close = s.get("prev_close")
         close = s.get("close_price")
-        vol = s.get("volume_24h")
         
         if prev_close and close and float(prev_close) > 0:
             # Percentage point move
@@ -140,9 +120,6 @@ def _calculate_token_stats(token_id: str, lookback_days: int) -> Optional[Dict]:
                 log_odds_changes.append(abs(lo2 - lo1))
             except (ValueError, ZeroDivisionError):
                 pass
-        
-        if vol and float(vol) > 0:
-            volumes.append(float(vol))
     
     if len(moves_pp) < MIN_SAMPLES:
         return None
@@ -160,7 +137,23 @@ def _calculate_token_stats(token_id: str, lookback_days: int) -> Optional[Dict]:
     
     avg_move, stddev_move, max_move = calc_stats(moves_pp)
     avg_lo, stddev_lo, _ = calc_stats(log_odds_changes) if log_odds_changes else (0.2, 0.5, 0)
-    avg_vol, stddev_vol, _ = calc_stats(volumes) if volumes else (10000, 20000, 0)
+
+    # Volume stats come from canonical trade-first daily baseline view.
+    volume_stats = db.execute(
+        """
+        SELECT avg_volume_7d, stddev_volume_7d
+        FROM volume_averages
+        WHERE token_id = %s
+        """,
+        (token_id,),
+        fetch=True,
+    ) or []
+    if volume_stats and volume_stats[0].get("avg_volume_7d") is not None:
+        avg_vol = float(volume_stats[0]["avg_volume_7d"])
+        stddev_vol_raw = volume_stats[0].get("stddev_volume_7d")
+        stddev_vol = float(stddev_vol_raw) if stddev_vol_raw is not None else 0.0
+    else:
+        avg_vol, stddev_vol = 10000.0, 20000.0
     
     return {
         "avg_move_pp": avg_move,

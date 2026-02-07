@@ -10,7 +10,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy requirements first for better caching
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir "streamlit-autorefresh>=1.0.1" \
+    && python -c "import streamlit_autorefresh"
 
 # Copy application code
 COPY packages/ ./packages/
@@ -29,4 +31,3 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 
 # Run Streamlit
 CMD ["sh", "-c", "streamlit run apps/dashboard/app.py --server.port=${PORT:-8501} --server.address=0.0.0.0"]
-

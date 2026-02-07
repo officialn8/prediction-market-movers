@@ -17,6 +17,7 @@ from uuid import UUID
 
 from packages.core.storage.queries import VolumeQueries, AnalyticsQueries, MarketQueries
 from packages.core.analytics import metrics
+from packages.core.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -160,17 +161,25 @@ async def _generate_volume_alert(
     Uses the existing alerts table with alert_type='volume_spike'.
     """
     try:
+        if settings.signal_hold_zone_enabled:
+            spike_edge = spike_ratio - ALERT_SPIKE_RATIO
+            if spike_edge < Decimal(str(settings.signal_hold_zone_spike_ratio)):
+                logger.debug(
+                    "Suppressed borderline volume alert via hold-zone "
+                    f"(token={token_id}, spike_edge={spike_edge:.3f})"
+                )
+                return
+
         # Check for recent volume alert on this token (separate from price alerts)
         existing = await asyncio.to_thread(
             AnalyticsQueries.get_recent_alert_for_token,
             token_id=token_id,
             window_seconds=3600,  # Use 1h window for volume alerts
             lookback_minutes=30,
+            alert_type="volume_spike",
         )
 
-        # If we have a recent alert, check if it was a volume alert
-        # Only skip if it was already a volume alert
-        if existing and existing.get("alert_type") == "volume_spike":
+        if existing:
             try:
                 last_ratio = Decimal(str(existing.get("volume_spike_ratio", 0)))
                 if spike_ratio <= last_ratio * Decimal("1.2"):
@@ -199,6 +208,8 @@ async def _generate_volume_alert(
             move_pp=price_change_1h or Decimal("0"),
             threshold_pp=Decimal("0"),  # No price threshold for volume alerts
             reason=reason,
+            alert_type="volume_spike",
+            volume_spike_ratio=spike_ratio,
         )
 
         logger.info(f"Generated volume alert: {title} ({outcome}) - {spike_ratio:.1f}x")

@@ -1,0 +1,16 @@
+{
+  "model": "zscore_mover_v1",
+  "version": 1,
+  "features": [
+    {"name": "price_now", "dtype": "float"},
+    {"name": "price_then", "dtype": "float"},
+    {"name": "volume_24h", "dtype": "float"},
+    {"name": "avg_move_pp", "dtype": "float"},
+    {"name": "stddev_move_pp", "dtype": "float"},
+    {"name": "avg_log_odds", "dtype": "float"},
+    {"name": "stddev_log_odds", "dtype": "float"},
+    {"name": "avg_volume", "dtype": "float"},
+    {"name": "stddev_volume", "dtype": "float"},
+    {"name": "window_minutes", "dtype": "float"}
+  ]
+}

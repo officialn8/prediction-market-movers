@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from apps.api.routers.auth import get_current_user
 from packages.core.storage import get_db_pool
+from packages.core.storage.queries import OHLCQueries
 
 router = APIRouter()
 
@@ -294,23 +295,26 @@ async def get_price_history(
     
     token_id = token[0]["token_id"]
     
-    # Get price history (using make_interval to avoid SQL injection)
-    history = db.execute(
-        """
-        SELECT ts as timestamp, price, volume_24h as volume
-        FROM snapshots
-        WHERE token_id = %s AND ts > NOW() - make_interval(hours => %s)
-        ORDER BY ts ASC
-        """,
-        (str(token_id), hours),
-        fetch=True
-    ) or []
-    
+    start_ts = datetime.utcnow() - timedelta(hours=hours)
+    history_rows = OHLCQueries.get_candles_for_timeframe(
+        token_id=token_id,
+        start_ts=start_ts,
+        hours=hours,
+    )
+
     return [
         PriceHistoryPoint(
-            timestamp=h["timestamp"],
-            price=float(h["price"]),
-            volume=float(h["volume"]) if h["volume"] else None,
+            timestamp=h.get("timestamp") or h.get("ts"),
+            price=float(h.get("price") if h.get("price") is not None else h.get("close", 0)),
+            volume=(
+                float(h["volume"])
+                if h.get("volume") is not None
+                else (
+                    float(h["volume_24h"])
+                    if h.get("volume_24h") is not None
+                    else None
+                )
+            ),
         )
-        for h in history
+        for h in history_rows
     ]

@@ -19,6 +19,7 @@ from apps.collector.adapters.polymarket import (
     PolymarketMarket,
     get_polymarket_adapter,
 )
+from packages.core.settings import settings
 from packages.core.storage.db import get_db_pool
 from packages.core.storage.queries import MarketQueries
 
@@ -49,6 +50,8 @@ class SyncState:
     # Volume cache: timestamp of last rebuild from DB
     last_volume_cache_rebuild: Optional[float] = None
     volume_cache_ttl_seconds: int = 900  # Rebuild volume cache every 15 minutes max
+    # Full metadata sweep timestamp (large max_markets run)
+    last_full_metadata_sync: Optional[float] = None
 
 
 # Module-level state
@@ -482,6 +485,15 @@ def should_sync_markets() -> bool:
     return elapsed >= MARKET_SYNC_INTERVAL
 
 
+def should_sync_full_metadata() -> bool:
+    """Check if it's time for a full Polymarket metadata sweep."""
+    state = get_sync_state()
+    if state.last_full_metadata_sync is None:
+        return True
+    elapsed = time.time() - state.last_full_metadata_sync
+    return elapsed >= settings.polymarket_full_metadata_sync_interval_seconds
+
+
 async def sync_once() -> None:
     """
     Run one sync cycle (called by collector main loop).
@@ -492,8 +504,20 @@ async def sync_once() -> None:
     adapter = get_polymarket_adapter()
     
     try:
-        # Sync market metadata periodically
-        if should_sync_markets():
+        # Run a low-frequency full metadata sweep to keep canonical URLs and
+        # category/status fields in sync across the full active universe.
+        if settings.polymarket_full_metadata_sync_enabled and should_sync_full_metadata():
+            logger.info(
+                "Running full Polymarket metadata refresh (max_markets=%s)",
+                settings.polymarket_full_metadata_max_markets,
+            )
+            sync_markets_and_prices(
+                adapter,
+                max_markets=settings.polymarket_full_metadata_max_markets,
+            )
+            get_sync_state().last_full_metadata_sync = time.time()
+        # Sync market metadata periodically for the tracked subset
+        elif should_sync_markets():
             sync_markets_and_prices(adapter, max_markets=MAX_MARKETS)
         else:
             # Just sync prices using CLOB API for real-time updates
@@ -526,8 +550,20 @@ def run_sync_loop(
         while True:
             now = time.time()
             
+            # Full metadata sweep (large universe) runs independently.
+            if settings.polymarket_full_metadata_sync_enabled and should_sync_full_metadata():
+                try:
+                    sync_markets_and_prices(
+                        adapter,
+                        max_markets=settings.polymarket_full_metadata_max_markets,
+                    )
+                    state = get_sync_state()
+                    state.last_full_metadata_sync = now
+                    last_market_sync = now
+                except Exception as e:
+                    logger.exception(f"Full metadata sync failed: {e}")
             # Sync markets if interval elapsed
-            if now - last_market_sync >= market_interval_sec:
+            elif now - last_market_sync >= market_interval_sec:
                 try:
                     sync_markets(adapter)
                     last_market_sync = now

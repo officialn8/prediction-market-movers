@@ -17,6 +17,7 @@ COPY packages/ ./packages/
 COPY migrations/ ./migrations/
 COPY apps/collector/ ./apps/collector/
 COPY apps/dashboard/ ./apps/dashboard/
+COPY scripts/ ./scripts/
 
 # Set Python path to include packages
 ENV PYTHONPATH=/app

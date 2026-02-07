@@ -1,72 +1,157 @@
-import logging
-import sys
-import os
+#!/usr/bin/env python3
+"""
+Backfill canonical Polymarket URLs in markets table.
 
-# Add project root to path
+Usage:
+  Dry run:
+    python scripts/backfill_polymarket_urls.py --max-markets 20000
+
+  Apply updates:
+    python scripts/backfill_polymarket_urls.py --max-markets 20000 --apply
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import os
+import sys
+
+# Add project root to path for direct script execution.
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from apps.collector.adapters.polymarket import PolymarketAdapter
 from packages.core.storage import get_db_pool
-from packages.core.storage.queries import MarketQueries
 
 
-def _backfill_for_active(adapter: PolymarketAdapter, active: bool, logger: logging.Logger) -> int:
-    label = "active" if active else "closed"
-    logger.info(f"Fetching {label} markets from Polymarket API...")
-    markets = adapter.fetch_all_markets(max_markets=5000, active=active)
-    logger.info(f"Fetched {len(markets)} {label} markets.")
-
-    updated_count = 0
-    for pm_market in markets:
-        if not pm_market.url:
-            continue
-
-        MarketQueries.upsert_market(
-            source="polymarket",
-            source_id=pm_market.condition_id,
-            title=pm_market.title,
-            category=pm_market.category,
-            end_date=pm_market.end_date,
-            status="active" if pm_market.active and not pm_market.closed else "closed",
-            url=pm_market.url,
-        )
-        updated_count += 1
-
-        if updated_count % 200 == 0:
-            logger.info(f"Updated {updated_count} {label} markets...")
-
-    return updated_count
+logger = logging.getLogger("backfill_polymarket_urls")
 
 
-def main() -> None:
-    """
-    One-off backfill to rewrite Polymarket market URLs to canonical event URLs.
-    """
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Backfill canonical Polymarket market URLs")
+    parser.add_argument(
+        "--max-markets",
+        type=int,
+        default=20000,
+        help="Maximum active Polymarket markets to fetch from Gamma API",
     )
-    logger = logging.getLogger("backfill_polymarket_urls")
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Persist updates to DB (default is dry-run)",
+    )
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Logging verbosity",
+    )
+    return parser.parse_args()
 
-    logger.info("Starting Polymarket URL backfill...")
 
+def _fetch_canonical_url_map(adapter: PolymarketAdapter, max_markets: int) -> dict[str, str]:
+    """Fetch active Polymarket markets and map source_id -> canonical URL."""
+    logger.info("Fetching active Polymarket markets (max_markets=%s)...", max_markets)
+    markets = adapter.fetch_all_markets(max_markets=max_markets, active=True)
+    logger.info("Fetched %s active markets from API.", len(markets))
+
+    url_map: dict[str, str] = {}
+    for market in markets:
+        canonical_url = (market.url or "").strip()
+        if canonical_url:
+            url_map[str(market.condition_id)] = canonical_url
+
+    logger.info("Built canonical URL map for %s markets.", len(url_map))
+    return url_map
+
+
+def run(max_markets: int, apply: bool) -> dict[str, int]:
     db = get_db_pool()
     if not db.health_check():
-        logger.error("Database not available")
-        return
+        raise RuntimeError("Database not available")
 
     adapter = PolymarketAdapter()
     try:
-        active_updates = _backfill_for_active(adapter, True, logger)
-        closed_updates = _backfill_for_active(adapter, False, logger)
+        url_map = _fetch_canonical_url_map(adapter, max_markets=max_markets)
+
+        rows = db.execute(
+            """
+            SELECT source_id, url
+            FROM markets
+            WHERE source = 'polymarket'
+            """,
+            fetch=True,
+        ) or []
+
+        stats = {
+            "scanned": 0,
+            "matched": 0,
+            "missing": 0,
+            "unchanged": 0,
+            "updated": 0,
+        }
+
+        update_params: list[tuple[str, str, str]] = []
+        for row in rows:
+            stats["scanned"] += 1
+            source_id = str(row.get("source_id") or "")
+            current_url = (row.get("url") or "").strip()
+
+            canonical_url = url_map.get(source_id)
+            if not canonical_url:
+                stats["missing"] += 1
+                continue
+
+            stats["matched"] += 1
+            if current_url == canonical_url:
+                stats["unchanged"] += 1
+                continue
+
+            update_params.append((canonical_url, source_id, canonical_url))
+
+        if apply and update_params:
+            updated = db.execute_many(
+                """
+                UPDATE markets
+                SET url = %s, updated_at = NOW()
+                WHERE source = 'polymarket'
+                  AND source_id = %s
+                  AND COALESCE(url, '') <> %s
+                """,
+                update_params,
+            )
+            stats["updated"] = max(updated, 0)
+        else:
+            stats["updated"] = len(update_params)
+
+        mode = "APPLY" if apply else "DRY-RUN"
         logger.info(
-            f"Backfill complete. Updated {active_updates} active and "
-            f"{closed_updates} closed markets."
+            "%s summary: scanned=%s matched=%s missing=%s unchanged=%s %s=%s",
+            mode,
+            stats["scanned"],
+            stats["matched"],
+            stats["missing"],
+            stats["unchanged"],
+            "updated" if apply else "would_update",
+            stats["updated"],
         )
-    except Exception as e:
-        logger.error(f"Backfill failed: {e}")
+        return stats
     finally:
         adapter.close()
+
+
+def main() -> None:
+    args = parse_args()
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+    )
+
+    try:
+        run(max_markets=args.max_markets, apply=args.apply)
+    except Exception as exc:
+        logger.error("Backfill failed: %s", exc)
+        raise SystemExit(1) from exc
 
 
 if __name__ == "__main__":

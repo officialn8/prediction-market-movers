@@ -12,6 +12,9 @@ import math
 from decimal import Decimal
 from typing import Optional, Tuple
 
+from packages.core.analytics.feature_manifest import validate_live_feature_rows
+from packages.core.settings import settings
+
 
 def calculate_move_pp(price_now: Decimal, price_then: Decimal) -> Decimal:
     """
@@ -617,38 +620,82 @@ class ZScoreMoverScorer:
         Returns:
             Sorted list with Z-score metrics
         """
-        scored = []
-        
+        prepared_rows: list[dict] = []
+        feature_rows: list[dict] = []
+
         for mover in movers:
             token_id = str(mover.get("token_id", ""))
-            
+
             try:
                 price_now = Decimal(str(mover.get(price_now_key, 0)))
                 price_then = Decimal(str(mover.get(price_then_key, 0)))
                 volume = Decimal(str(mover.get(volume_key, 0) or 0))
-                
-                # Get market-specific stats if available
+
                 market_stats = None
                 if market_stats_map and token_id in market_stats_map:
                     market_stats = market_stats_map[token_id]
-                
-                z_score, metrics = self.score(
-                    price_now, price_then, volume,
-                    market_stats=market_stats,
-                    time_elapsed_minutes=window_minutes,
+
+                stats_for_features = market_stats or {
+                    "avg_move_pp": 2.0,
+                    "stddev_move_pp": 3.0,
+                    "avg_log_odds": 0.2,
+                    "stddev_log_odds": 0.5,
+                    "avg_volume": 10000.0,
+                    "stddev_volume": 20000.0,
+                }
+                feature_rows.append(
+                    {
+                        "price_now": float(price_now),
+                        "price_then": float(price_then),
+                        "volume_24h": float(volume),
+                        "avg_move_pp": float(stats_for_features.get("avg_move_pp", 2.0)),
+                        "stddev_move_pp": float(stats_for_features.get("stddev_move_pp", 3.0)),
+                        "avg_log_odds": float(stats_for_features.get("avg_log_odds", 0.2)),
+                        "stddev_log_odds": float(stats_for_features.get("stddev_log_odds", 0.5)),
+                        "avg_volume": float(stats_for_features.get("avg_volume", 10000.0)),
+                        "stddev_volume": float(stats_for_features.get("stddev_volume", 20000.0)),
+                        "window_minutes": float(window_minutes or 0.0),
+                    }
                 )
-                
-                if not self.is_significant(z_score):
-                    continue
-                
-                # Add all metrics to mover
-                mover["z_score"] = z_score
-                mover["quality_score"] = z_score  # Alias for compatibility
-                mover.update(metrics)
-                scored.append(mover)
-                
+
+                prepared_rows.append(
+                    {
+                        "mover": mover,
+                        "price_now": price_now,
+                        "price_then": price_then,
+                        "volume": volume,
+                        "market_stats": market_stats,
+                    }
+                )
             except (ValueError, TypeError):
                 continue
+
+        if settings.model_feature_manifest_strict:
+            validate_live_feature_rows(
+                feature_rows,
+                manifest_path=settings.model_feature_manifest_path,
+            )
+
+        scored = []
+
+        for prepared in prepared_rows:
+            mover = prepared["mover"]
+            z_score, metrics = self.score(
+                prepared["price_now"],
+                prepared["price_then"],
+                prepared["volume"],
+                market_stats=prepared["market_stats"],
+                time_elapsed_minutes=window_minutes,
+            )
+
+            if not self.is_significant(z_score):
+                continue
+
+            # Add all metrics to mover
+            mover["z_score"] = z_score
+            mover["quality_score"] = z_score  # Alias for compatibility
+            mover.update(metrics)
+            scored.append(mover)
         
         # Sort by Z-score descending
         scored.sort(key=lambda x: float(x["z_score"]), reverse=True)

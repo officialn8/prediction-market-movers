@@ -49,6 +49,54 @@ class Settings(BaseSettings):
     # Collector Settings
     sync_interval_seconds: int = Field(default=300, ge=60, le=3600)
     log_level: str = Field(default="INFO")
+    retention_run_interval_seconds: int = Field(
+        default=3600,
+        ge=300,
+        le=86400,
+        description="How often retention cleanup runs",
+    )
+
+    # Snapshot write-gating settings
+    snapshot_min_write_interval_seconds: float = Field(
+        default=5.0,
+        ge=0.5,
+        le=300.0,
+        description="Minimum interval between snapshot writes per token",
+    )
+    snapshot_force_write_delta_pp: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=50.0,
+        description="Force write when absolute price move exceeds this threshold (percentage points)",
+    )
+
+    # Table-specific retention settings (days)
+    snapshot_retention_days: int = Field(default=3, ge=1, le=365)
+    ohlc_1m_retention_days: int = Field(default=14, ge=1, le=365)
+    ohlc_1h_retention_days: int = Field(default=120, ge=7, le=3650)
+    movers_cache_retention_days: int = Field(default=14, ge=1, le=365)
+    alerts_retention_days: int = Field(default=30, ge=1, le=3650)
+    volume_spikes_retention_days: int = Field(default=30, ge=1, le=3650)
+    arbitrage_retention_days: int = Field(default=14, ge=1, le=365)
+    volume_hourly_retention_days: int = Field(default=120, ge=7, le=3650)
+    storage_metrics_interval_seconds: int = Field(
+        default=300,
+        ge=60,
+        le=3600,
+        description="Interval for emitting storage telemetry snapshots",
+    )
+    volume_wss_stale_after_seconds: int = Field(
+        default=600,
+        ge=60,
+        le=86400,
+        description="Maximum age for WSS-derived volume before it is treated as stale",
+    )
+    volume_provider_stale_after_seconds: int = Field(
+        default=7200,
+        ge=300,
+        le=604800,
+        description="Maximum age for provider-derived volume before it is treated as stale",
+    )
 
     # Instant mover settings
     instant_mover_threshold_pp: float = Field(
@@ -66,6 +114,54 @@ class Settings(BaseSettings):
     instant_mover_min_volume: float = Field(
         default=0.0,
         description="Minimum volume required to consider instant mover alerts (0 disables)",
+    )
+    signal_hold_zone_enabled: bool = Field(
+        default=True,
+        description="Suppress borderline mover/alert signals near thresholds while keeping ranking unchanged",
+    )
+    signal_hold_zone_move_pp: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=50.0,
+        description="Minimum move edge (pp above threshold) required to clear hold zone",
+    )
+    signal_hold_zone_quality_score: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=100.0,
+        description="Minimum quality-score edge required to clear hold zone",
+    )
+    signal_hold_zone_spike_ratio: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=50.0,
+        description="Minimum spike-ratio edge required to clear hold zone",
+    )
+    model_feature_manifest_path: str = Field(
+        default="packages/core/analytics/mover_feature_manifest.json",
+        description="Path to the training feature manifest used for strict inference validation",
+    )
+    model_feature_manifest_strict: bool = Field(
+        default=True,
+        description="Fail scoring/inference when live feature columns/order/types diverge from manifest",
+    )
+    model_scoring_interval_seconds: int = Field(
+        default=86400,
+        ge=3600,
+        le=604800,
+        description="Interval for daily resolved-market scoring updates",
+    )
+    model_scoring_initial_delay_seconds: int = Field(
+        default=900,
+        ge=0,
+        le=21600,
+        description="Initial delay before first resolved-market scoring run",
+    )
+    model_scoring_calibration_bins: int = Field(
+        default=10,
+        ge=4,
+        le=20,
+        description="Number of probability bins to compute for calibration diagnostics",
     )
 
     # Polymarket WebSocket Settings
@@ -96,6 +192,28 @@ class Settings(BaseSettings):
     wss_watchdog_timeout: int = Field(
         default=120,
         description="Seconds without messages before forcing reconnect"
+    )
+    polymarket_subscription_refresh_seconds: int = Field(
+        default=300,
+        ge=30,
+        le=3600,
+        description="Refresh interval for Polymarket active subscriptions",
+    )
+    polymarket_full_metadata_sync_enabled: bool = Field(
+        default=True,
+        description="Run periodic full Polymarket metadata refresh for link/category correctness",
+    )
+    polymarket_full_metadata_sync_interval_seconds: int = Field(
+        default=86400,
+        ge=3600,
+        le=604800,
+        description="Interval for full Polymarket metadata refresh",
+    )
+    polymarket_full_metadata_max_markets: int = Field(
+        default=20000,
+        ge=500,
+        le=100000,
+        description="Maximum number of Polymarket markets to scan during full metadata refresh",
     )
     
     # Kalshi WebSocket Settings
@@ -139,4 +257,3 @@ def get_settings() -> Settings:
 
 # Convenience export
 settings = get_settings()
-

@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta
+from html import escape
 from typing import Optional
+from urllib.parse import urlparse, urlunparse
 import uuid
 
 import pandas as pd
@@ -146,6 +148,52 @@ def format_volume(volume: float) -> str:
         return f"${volume:.0f}"
 
 
+def normalize_market_url(market_url: Optional[str], source: Optional[str] = None) -> Optional[str]:
+    """Normalize and validate external market URLs by source."""
+    if not market_url:
+        return None
+
+    raw_url = str(market_url).strip()
+    if not raw_url:
+        return None
+
+    if raw_url.startswith("//"):
+        raw_url = f"https:{raw_url}"
+    elif "://" not in raw_url:
+        raw_url = f"https://{raw_url.lstrip('/')}"
+
+    try:
+        parsed = urlparse(raw_url)
+    except Exception:
+        return None
+
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+
+    host = parsed.netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+
+    path_segments = [segment for segment in (parsed.path or "").split("/") if segment]
+    source_lower = (source or "").strip().lower()
+
+    if source_lower == "polymarket" or host == "polymarket.com":
+        if host != "polymarket.com" or len(path_segments) < 2 or path_segments[0] != "event":
+            return None
+        # Canonical Polymarket links are /event/<event_slug>[/<market_slug>]
+        canonical_segments = path_segments[:3]
+        canonical_path = "/" + "/".join(canonical_segments)
+        return urlunparse(("https", "polymarket.com", canonical_path, "", "", ""))
+
+    if source_lower == "kalshi" or host == "kalshi.com":
+        if host != "kalshi.com":
+            return None
+        canonical_path = "/" + "/".join(path_segments) if path_segments else "/"
+        return urlunparse(("https", "kalshi.com", canonical_path, "", "", ""))
+
+    return None
+
+
 def get_spike_badge(spike_ratio: Optional[float]) -> str:
     """Generate HTML badge for volume spike indicator."""
     if spike_ratio is None or spike_ratio < 1.5:
@@ -198,14 +246,44 @@ def render_mover_card(mover: dict, show_watchlist: bool = True) -> None:
     pct_change = float(mover.get("pct_change") or mover.get("move_pp") or 0)
     change_sign = "+" if pct_change > 0 else ""
 
-    source = mover.get("source", "unknown")
-    outcome = mover.get("outcome", "YES")
+    source = str(mover.get("source") or "unknown")
+    source_label = escape(source)
+    outcome = str(mover.get("outcome") or "YES")
+    outcome_label = escape(outcome)
 
     latest_price = float(mover.get("latest_price") or mover.get("price_now") or 0)
     old_price = float(mover.get("old_price") or mover.get("price_then") or 0)
 
-    # Try to get volume from various keys (cache vs raw SQL might differ)
-    volume = float(mover.get("latest_volume") or mover.get("current_volume") or mover.get("volume_24h") or 0)
+    # Prefer display_volume when present (used by 5m stale-volume UI fallback).
+    raw_volume = mover.get("display_volume")
+    if raw_volume is None:
+        raw_volume = (
+            mover.get("latest_volume")
+            or mover.get("current_volume")
+            or mover.get("volume_24h")
+            or 0
+        )
+    volume = float(raw_volume or 0)
+    stale_volume = bool(mover.get("display_volume_is_stale"))
+    stale_age_seconds = mover.get("display_volume_age_seconds")
+    stale_volume_note = ""
+    if stale_volume:
+        age_label = ""
+        try:
+            age_seconds = float(stale_age_seconds) if stale_age_seconds is not None else None
+        except (TypeError, ValueError):
+            age_seconds = None
+        if age_seconds is not None:
+            if age_seconds >= 3600:
+                age_label = f" ({age_seconds / 3600:.1f}h old)"
+            elif age_seconds >= 60:
+                age_label = f" ({age_seconds / 60:.0f}m old)"
+            else:
+                age_label = f" ({age_seconds:.0f}s old)"
+        stale_volume_note = (
+            f'<span style="display: inline-block; margin-left: 0.4rem; '
+            f'font-size: 0.72rem; color: #a1a1aa;">stale volume{age_label}</span>'
+        )
 
     # Get volume spike ratio if available
     spike_ratio = mover.get("volume_spike_ratio")
@@ -217,14 +295,21 @@ def render_mover_card(mover: dict, show_watchlist: bool = True) -> None:
 
     # Generate reason with spike context (HTML format)
     reason = generate_reason(pct_change, volume, outcome, spike_ratio, use_html=True)
+    if stale_volume_note:
+        reason += f" {stale_volume_note}"
 
     # Get spike badge HTML
     spike_badge = get_spike_badge(spike_ratio)
 
     market_id = str(mover.get("market_id", ""))
-    title = mover.get('title', 'Unknown Market')
-    market_url = mover.get("url") or mover.get("market_url") or ""
-    category = mover.get('category', 'Uncategorized')
+    title = str(mover.get("title") or "Unknown Market")
+    title_html = escape(title)
+    market_url = normalize_market_url(
+        mover.get("url") or mover.get("market_url"),
+        source=source,
+    )
+    category = str(mover.get("category") or "Uncategorized")
+    category_html = escape(category)
     
     # Check if in watchlist
     in_watchlist = is_in_watchlist(market_id) if market_id else False
@@ -253,25 +338,30 @@ def render_mover_card(mover: dict, show_watchlist: bool = True) -> None:
 
     link_html = ""
     if market_url:
-        link_html = f'<a href="{market_url}" target="_blank" style="display: inline-block; font-size: 0.8rem; color: #6366f1; text-decoration: none; margin-bottom: 0.25rem;">View market →</a>'
+        safe_url = escape(market_url, quote=True)
+        link_html = (
+            f'<a href="{safe_url}" target="_blank" rel="noopener noreferrer" '
+            f'style="display: inline-block; font-size: 0.8rem; color: #6366f1; '
+            f'text-decoration: none; margin-bottom: 0.25rem;">View market →</a>'
+        )
 
     # Build HTML string with proper structure
     html_content = f"""<div style="background: {card_bg}; border: 1px solid {card_border}; border-radius: 12px; padding: 1.25rem; margin-bottom: 0.5rem;">
   <div style="display: flex; justify-content: space-between; align-items: flex-start;">
     <div style="flex: 1;">
       <div style="margin-bottom: 0.5rem;">
-        <span style="display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.7rem; font-weight: 600; text-transform: uppercase; background: rgba(99, 102, 241, 0.15); color: #6366f1;">{source}</span>
-        <span style="display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.7rem; font-weight: 600; margin-left: 0.5rem; background: {outcome_bg}; color: {outcome_color};">{outcome}</span>
+        <span style="display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.7rem; font-weight: 600; text-transform: uppercase; background: rgba(99, 102, 241, 0.15); color: #6366f1;">{source_label}</span>
+        <span style="display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.7rem; font-weight: 600; margin-left: 0.5rem; background: {outcome_bg}; color: {outcome_color};">{outcome_label}</span>
         {spike_badge}
       </div>
-      <p style="font-family: system-ui, sans-serif; font-size: 1rem; font-weight: 500; color: {title_color}; margin: 0 0 0.5rem 0; line-height: 1.4;">{title}</p>
+      <p style="font-family: system-ui, sans-serif; font-size: 1rem; font-weight: 500; color: {title_color}; margin: 0 0 0.5rem 0; line-height: 1.4;">{title_html}</p>
       {link_html}
       <p style="font-family: monospace; font-size: 0.85rem; color: {muted_color}; margin: 0;">${old_price:.2f} → ${latest_price:.2f}</p>
       <div style="margin-top: 0.5rem; font-size: 0.85rem; color: {secondary_color};">📊 {reason}</div>
     </div>
     <div style="text-align: right;">
       <p style="font-family: monospace; font-size: 1.5rem; font-weight: 600; color: {change_color}; margin: 0;">{change_sign}{pct_change:.1f}pp</p>
-      <p style="font-size: 0.75rem; color: {muted_color}; margin: 0.25rem 0 0 0;">{category}</p>
+      <p style="font-size: 0.75rem; color: {muted_color}; margin: 0.25rem 0 0 0;">{category_html}</p>
     </div>
   </div>
 </div>"""

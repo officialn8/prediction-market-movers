@@ -33,6 +33,22 @@ COMBINED_MOVE_THRESHOLD = Decimal("5.0")    # 5% move when combined with spike
 COMBINED_SPIKE_THRESHOLD = Decimal("2.0")   # 2x spike when combined with move
 
 
+def _passes_hold_zone(
+    move_edge_pp: Decimal,
+    spike_edge_ratio: Optional[Decimal] = None,
+) -> bool:
+    """Suppress borderline triggers while preserving ranking behavior elsewhere."""
+    if not settings.signal_hold_zone_enabled:
+        return True
+
+    move_gate = move_edge_pp >= Decimal(str(settings.signal_hold_zone_move_pp))
+    spike_gate = False
+    if spike_edge_ratio is not None:
+        spike_gate = spike_edge_ratio >= Decimal(str(settings.signal_hold_zone_spike_ratio))
+
+    return move_gate or spike_gate
+
+
 def get_dynamic_threshold(end_date: Optional[datetime]) -> Decimal:
     """
     Calculate alert threshold based on time remaining until market closes.
@@ -145,13 +161,30 @@ async def run_alerts_check() -> None:
                 if not is_significant:
                     continue
 
+                move_edge = abs_move - threshold
+                spike_edge = None
+                if spike_ratio is not None:
+                    spike_edge = spike_ratio - COMBINED_SPIKE_THRESHOLD
+                if not _passes_hold_zone(move_edge_pp=move_edge, spike_edge_ratio=spike_edge):
+                    logger.debug(
+                        "Suppressed borderline alert via hold-zone "
+                        f"(token={token_id_str}, move_edge={move_edge:.3f}, spike_edge={spike_edge})"
+                    )
+                    continue
+
                 # Deduplication: Check recent alerts
                 window_seconds = ALERT_WINDOW_HOURS * 3600
+                alert_type = (
+                    "combined"
+                    if spike_ratio is not None and spike_ratio >= COMBINED_SPIKE_THRESHOLD
+                    else "price_move"
+                )
                 existing = await asyncio.to_thread(
                     AnalyticsQueries.get_recent_alert_for_token,
                     token_id=token_id,
                     window_seconds=window_seconds,
-                    lookback_minutes=30
+                    lookback_minutes=30,
+                    alert_type=alert_type,
                 )
 
                 if existing:
@@ -203,6 +236,8 @@ async def run_alerts_check() -> None:
                     move_pp=move_pp,
                     threshold_pp=threshold,
                     reason=reason_text,
+                    alert_type=alert_type,
+                    volume_spike_ratio=spike_ratio,
                 )
 
                 alerts_generated += 1
@@ -265,6 +300,10 @@ async def check_volume_only_alerts() -> None:
                     if spike_ratio <= last_ratio * Decimal("1.2"):
                         continue
 
+                spike_edge = spike_ratio - ALERT_SPIKE_RATIO
+                if not _passes_hold_zone(move_edge_pp=Decimal("0"), spike_edge_ratio=spike_edge):
+                    continue
+
                 # Record the spike
                 await asyncio.to_thread(
                     VolumeQueries.insert_volume_spike,
@@ -291,6 +330,8 @@ async def check_volume_only_alerts() -> None:
                     move_pp=Decimal("0"),
                     threshold_pp=Decimal("0"),
                     reason=reason,
+                    alert_type="volume_spike",
+                    volume_spike_ratio=spike_ratio,
                 )
 
                 alerts_generated += 1

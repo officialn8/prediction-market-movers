@@ -9,7 +9,16 @@ from decimal import Decimal
 from typing import Optional
 from uuid import UUID
 
+from packages.core.settings import settings
 from packages.core.storage.db import get_db_pool
+
+
+def _volume_freshness_clause(alias: str = "v") -> str:
+    """Build a source-aware strict freshness clause for volume rows."""
+    return (
+        f"(({alias}.volume_source = 'wss' AND {alias}.volume_age_seconds <= %s) "
+        f"OR ({alias}.volume_source = 'gamma' AND {alias}.volume_age_seconds <= %s))"
+    )
 
 
 @dataclass
@@ -321,6 +330,8 @@ class MarketQueries:
                     wss_trade_count
                 FROM v_latest_volumes
                 WHERE has_volume_data = true
+                  AND is_volume_fresh = true
+                  AND {_volume_freshness_clause("v_latest_volumes")}
             ),
             historical AS (
                 SELECT DISTINCT ON (token_id)
@@ -353,6 +364,7 @@ class MarketQueries:
                 m.title,
                 m.source,
                 m.category,
+                m.source_id,
                 m.url,
                 m.end_date
             FROM changes c
@@ -367,7 +379,11 @@ class MarketQueries:
             LIMIT %s
         """
 
-        params = [hours]
+        params = [
+            settings.volume_wss_stale_after_seconds,
+            settings.volume_provider_stale_after_seconds,
+            hours,
+        ]
         if source:
             params.append(source)
         if category:
@@ -434,6 +450,8 @@ class MarketQueries:
                     wss_trade_count
                 FROM v_latest_volumes
                 WHERE has_volume_data = true
+                  AND is_volume_fresh = true
+                  AND {_volume_freshness_clause("v_latest_volumes")}
             ),
             historical AS (
                 SELECT DISTINCT ON (token_id)
@@ -465,6 +483,7 @@ class MarketQueries:
                 m.title,
                 m.source,
                 m.category,
+                m.source_id,
                 m.url
             FROM changes c
             JOIN market_tokens mt ON c.token_id = mt.token_id
@@ -478,7 +497,11 @@ class MarketQueries:
             LIMIT %s
         """
 
-        params = [window_seconds]
+        params = [
+            settings.volume_wss_stale_after_seconds,
+            settings.volume_provider_stale_after_seconds,
+            window_seconds,
+        ]
         if source:
             params.append(source)
         if category:
@@ -716,20 +739,30 @@ class AnalyticsQueries:
         move_pp: Decimal,
         threshold_pp: Decimal,
         reason: str,
+        alert_type: str = "price_move",
+        volume_spike_ratio: Optional[Decimal] = None,
     ) -> dict:
         """Insert a new alert."""
         db = get_db_pool()
         query = """
             INSERT INTO alerts (
-                token_id, window_seconds, move_pp, 
-                threshold_pp, reason
+                token_id, window_seconds, move_pp,
+                threshold_pp, reason, alert_type, volume_spike_ratio
             )
-            VALUES (%s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             RETURNING *
         """
         result = db.execute(
             query,
-            (str(token_id), window_seconds, move_pp, threshold_pp, reason),
+            (
+                str(token_id),
+                window_seconds,
+                move_pp,
+                threshold_pp,
+                reason,
+                alert_type,
+                volume_spike_ratio,
+            ),
             fetch=True,
         )
         return result[0] if result else {}
@@ -760,7 +793,8 @@ class AnalyticsQueries:
     def get_recent_alert_for_token(
         token_id: UUID, 
         window_seconds: int = 3600,
-        lookback_minutes: int = 30
+        lookback_minutes: int = 30,
+        alert_type: Optional[str] = None,
     ) -> Optional[dict]:
         """
         Check if an alert was generated for this token + window recently.
@@ -771,17 +805,22 @@ class AnalyticsQueries:
             lookback_minutes: How far back to check for existing alerts (cooldown)
         """
         db = get_db_pool()
-        query = """
+        type_filter = "AND alert_type = %s" if alert_type else ""
+        query = f"""
             SELECT * FROM alerts 
             WHERE token_id = %s 
               AND window_seconds = %s
               AND created_at > NOW() - (%s * INTERVAL '1 minute')
+              {type_filter}
             ORDER BY created_at DESC
             LIMIT 1
         """
+        params = [str(token_id), window_seconds, lookback_minutes]
+        if alert_type:
+            params.append(alert_type)
         result = db.execute(
-            query, 
-            (str(token_id), window_seconds, lookback_minutes), 
+            query,
+            tuple(params),
             fetch=True
         )
         return result[0] if result else None
@@ -842,6 +881,7 @@ class AnalyticsQueries:
                 m.title,
                 m.source,
                 m.category,
+                m.source_id,
                 m.url
             FROM movers_cache mc
             JOIN latest_batch lb ON mc.as_of_ts = lb.max_ts
@@ -1166,7 +1206,10 @@ class VolumeQueries:
                 has_volume_data,
                 wss_trade_count,
                 wss_updated_at,
-                gamma_updated_at
+                gamma_updated_at,
+                volume_as_of,
+                volume_age_seconds,
+                is_volume_fresh
             FROM v_latest_volumes
             WHERE token_id = %s
         """
@@ -1197,7 +1240,10 @@ class VolumeQueries:
                 has_volume_data,
                 wss_trade_count,
                 wss_updated_at,
-                gamma_updated_at
+                gamma_updated_at,
+                volume_as_of,
+                volume_age_seconds,
+                is_volume_fresh
             FROM v_latest_volumes
             WHERE token_id IN ({placeholders})
         """
@@ -1219,7 +1265,10 @@ class VolumeQueries:
         db = get_db_pool()
         
         source_filter = "AND m.source = %s" if source else ""
-        params = []
+        params = [
+            settings.volume_wss_stale_after_seconds,
+            settings.volume_provider_stale_after_seconds,
+        ]
         if source:
             params.append(source)
         params.append(limit)
@@ -1242,6 +1291,8 @@ class VolumeQueries:
             JOIN market_tokens mt ON v.token_id = mt.token_id
             JOIN markets m ON mt.market_id = m.market_id
             WHERE v.has_volume_data = true
+              AND v.is_volume_fresh = true
+              AND {_volume_freshness_clause("v")}
               AND v.volume_24h > 0
               {source_filter}
             ORDER BY v.volume_24h DESC
@@ -1252,9 +1303,9 @@ class VolumeQueries:
     @staticmethod
     def get_volume_averages(token_ids: Optional[list[UUID]] = None) -> list[dict]:
         """
-        Get 7-day average volume for tokens.
+        Get historical average daily volume for tokens.
 
-        Uses the volume_averages view created in migration 007.
+        Uses the canonical volume_averages view (trade-first with provider fallback).
         Falls back to direct query if view doesn't exist.
 
         Args:
@@ -1291,34 +1342,101 @@ class VolumeQueries:
         params = []
         if token_ids:
             placeholders = ','.join(['%s'] * len(token_ids))
-            token_filter = f"AND s.token_id IN ({placeholders})"
+            token_filter = f"AND token_id IN ({placeholders})"
             params = [str(tid) for tid in token_ids]
+        query_params = params + params if params else None
 
         query = f"""
-            WITH daily_volumes AS (
-                SELECT DISTINCT ON (token_id, DATE(ts))
+            WITH trade_daily AS (
+                SELECT
                     token_id,
-                    volume_24h,
-                    ts
-                FROM snapshots
-                WHERE ts > NOW() - INTERVAL '7 days'
-                  AND volume_24h IS NOT NULL
-                  AND volume_24h > 0
+                    DATE(bucket_ts) AS day,
+                    SUM(volume_notional) AS day_volume
+                FROM volume_hourly
+                WHERE bucket_ts >= DATE_TRUNC('day', NOW()) - INTERVAL '14 days'
+                  AND bucket_ts < DATE_TRUNC('day', NOW())
                   {token_filter}
-                ORDER BY token_id, DATE(ts), ts DESC
+                GROUP BY token_id, DATE(bucket_ts)
+            ),
+            provider_daily AS (
+                SELECT
+                    token_id,
+                    day,
+                    day_volume
+                FROM (
+                    SELECT DISTINCT ON (token_id, DATE(ts))
+                        token_id,
+                        DATE(ts) AS day,
+                        volume_24h AS day_volume,
+                        ts
+                    FROM snapshots
+                    WHERE ts >= DATE_TRUNC('day', NOW()) - INTERVAL '14 days'
+                      AND ts < DATE_TRUNC('day', NOW())
+                      AND volume_24h IS NOT NULL
+                      AND volume_24h > 0
+                      {token_filter}
+                    ORDER BY token_id, DATE(ts), ts DESC
+                ) s
+            ),
+            merged_daily AS (
+                SELECT
+                    td.token_id,
+                    td.day,
+                    td.day_volume
+                FROM trade_daily td
+                UNION ALL
+                SELECT
+                    pd.token_id,
+                    pd.day,
+                    pd.day_volume
+                FROM provider_daily pd
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM trade_daily td
+                    WHERE td.token_id = pd.token_id
+                      AND td.day = pd.day
+                )
             )
             SELECT
                 token_id,
-                AVG(volume_24h) as avg_volume_7d,
-                STDDEV(volume_24h) as stddev_volume_7d,
-                MAX(volume_24h) as max_volume_7d,
-                MIN(volume_24h) as min_volume_7d,
-                COUNT(*) as sample_count
-            FROM daily_volumes
+                AVG(day_volume) AS avg_volume_7d,
+                STDDEV(day_volume) AS stddev_volume_7d,
+                MAX(day_volume) AS max_volume_7d,
+                MIN(day_volume) AS min_volume_7d,
+                COUNT(*) AS sample_count
+            FROM merged_daily
             GROUP BY token_id
             HAVING COUNT(*) >= 2
         """
-        return db.execute(query, tuple(params) if params else None, fetch=True) or []
+        try:
+            return db.execute(query, tuple(query_params) if query_params else None, fetch=True) or []
+        except Exception:
+            # Legacy fallback for pre-migration databases.
+            legacy_query = f"""
+                WITH daily_volumes AS (
+                    SELECT DISTINCT ON (token_id, DATE(bucket_ts))
+                        token_id,
+                        volume,
+                        bucket_ts
+                    FROM ohlc_1h
+                    WHERE bucket_ts > NOW() - INTERVAL '14 days'
+                      AND volume IS NOT NULL
+                      AND volume > 0
+                      {token_filter}
+                    ORDER BY token_id, DATE(bucket_ts), bucket_ts DESC
+                )
+                SELECT
+                    token_id,
+                    AVG(volume) as avg_volume_7d,
+                    STDDEV(volume) as stddev_volume_7d,
+                    MAX(volume) as max_volume_7d,
+                    MIN(volume) as min_volume_7d,
+                    COUNT(*) as sample_count
+                FROM daily_volumes
+                GROUP BY token_id
+                HAVING COUNT(*) >= 2
+            """
+            return db.execute(legacy_query, tuple(params) if params else None, fetch=True) or []
 
     @staticmethod
     def get_current_volumes(limit: int = 500) -> list[dict]:
@@ -1381,25 +1499,16 @@ class VolumeQueries:
                     gamma_updated_at
                 FROM v_latest_volumes
                 WHERE has_volume_data = true
+                  AND is_volume_fresh = true
+                  AND ((volume_source = 'wss' AND volume_age_seconds <= %s)
+                    OR (volume_source = 'gamma' AND volume_age_seconds <= %s))
             ),
             averages AS (
                 SELECT
-                    s.token_id,
-                    AVG(s.volume_24h) as avg_volume,
-                    STDDEV(s.volume_24h) as stddev_volume
-                FROM (
-                    SELECT DISTINCT ON (token_id, DATE(ts))
-                        token_id,
-                        volume_24h
-                    FROM snapshots
-                    WHERE ts > NOW() - INTERVAL '7 days'
-                      AND ts < NOW() - INTERVAL '1 day'  -- Exclude last 24h from avg
-                      AND volume_24h IS NOT NULL
-                      AND volume_24h > 0
-                    ORDER BY token_id, DATE(ts), ts DESC
-                ) s
-                GROUP BY s.token_id
-                HAVING COUNT(*) >= 2
+                    token_id,
+                    avg_volume_7d as avg_volume,
+                    stddev_volume_7d as stddev_volume
+                FROM volume_averages
             ),
             spikes AS (
                 SELECT
@@ -1433,7 +1542,17 @@ class VolumeQueries:
             ORDER BY sp.spike_ratio DESC
             LIMIT %s
         """
-        return db.execute(query, (min_volume, min_spike_ratio, limit), fetch=True) or []
+        return db.execute(
+            query,
+            (
+                settings.volume_wss_stale_after_seconds,
+                settings.volume_provider_stale_after_seconds,
+                min_volume,
+                min_spike_ratio,
+                limit,
+            ),
+            fetch=True,
+        ) or []
 
     @staticmethod
     def insert_volume_spike(
@@ -1545,19 +1664,20 @@ class VolumeQueries:
                 SELECT DISTINCT ON (token_id)
                     token_id,
                     ts as latest_ts,
-                    price as latest_price,
-                    volume_24h as current_volume
+                    price as latest_price
                 FROM snapshots
                 ORDER BY token_id, ts DESC
             ),
             latest_volume AS (
-                -- Get latest NON-NULL volume (from REST syncs, not WSS which has NULL volume)
-                SELECT DISTINCT ON (token_id)
+                -- Get latest fresh volume from canonical view.
+                SELECT
                     token_id,
                     volume_24h as latest_volume
-                FROM snapshots
-                WHERE volume_24h IS NOT NULL
-                ORDER BY token_id, ts DESC
+                FROM v_latest_volumes
+                WHERE has_volume_data = true
+                  AND is_volume_fresh = true
+                  AND ((volume_source = 'wss' AND volume_age_seconds <= %s)
+                    OR (volume_source = 'gamma' AND volume_age_seconds <= %s))
             ),
             historical AS (
                 SELECT DISTINCT ON (token_id)
@@ -1570,26 +1690,14 @@ class VolumeQueries:
             volume_avgs AS (
                 SELECT
                     token_id,
-                    AVG(volume_24h) as avg_volume
-                FROM (
-                    SELECT DISTINCT ON (token_id, DATE(ts))
-                        token_id,
-                        volume_24h
-                    FROM snapshots
-                    WHERE ts > NOW() - INTERVAL '7 days'
-                      AND ts < NOW() - INTERVAL '1 day'
-                      AND volume_24h IS NOT NULL
-                      AND volume_24h > 0
-                    ORDER BY token_id, DATE(ts), ts DESC
-                ) daily
-                GROUP BY token_id
-                HAVING COUNT(*) >= 2
+                    avg_volume_7d as avg_volume
+                FROM volume_averages
             )
             SELECT
                 l.token_id,
                 l.latest_ts,
                 l.latest_price,
-                COALESCE(lv.latest_volume, l.current_volume, 0) as latest_volume,
+                COALESCE(lv.latest_volume, 0) as latest_volume,
                 h.old_price,
                 va.avg_volume,
                 -- Use percentage points (pp) instead of percentage change
@@ -1613,7 +1721,11 @@ class VolumeQueries:
             LIMIT %s
         """
 
-        params = [window_seconds]
+        params = [
+            settings.volume_wss_stale_after_seconds,
+            settings.volume_provider_stale_after_seconds,
+            window_seconds,
+        ]
         if source:
             params.append(source)
         params.append(limit)
@@ -1991,4 +2103,3 @@ class ArbitrageQueries:
             (title, source, title, threshold, title, limit),
             fetch=True,
         ) or []
-

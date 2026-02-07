@@ -154,6 +154,8 @@ def verify_schema_readiness() -> None:
         "ohlc_5m",
         "ohlc_1h",
         "trade_volumes",
+        "volume_hourly",
+        "model_scoring_daily",
     ]
 
     missing_tables = []
@@ -485,11 +487,11 @@ async def run_volume_spikes_loop(shutdown: Shutdown) -> None:
 
 
 async def run_retention_loop(shutdown: Shutdown) -> None:
-    """Background loop for data retention - prunes old snapshots daily."""
+    """Background loop for data retention with table-specific policies."""
     from apps.collector.jobs.retention import run_retention_cleanup
 
-    # Run once on startup, then daily
-    logger.info("Retention loop starting (interval=24h)")
+    interval_seconds = settings.retention_run_interval_seconds
+    logger.info(f"Retention loop starting (interval={interval_seconds}s)")
     
     # Initial cleanup on startup
     try:
@@ -499,8 +501,7 @@ async def run_retention_loop(shutdown: Shutdown) -> None:
     
     while not shutdown.is_set:
         try:
-            # Wait 24 hours before next cleanup
-            await asyncio.wait_for(shutdown.wait(), timeout=86400)
+            await asyncio.wait_for(shutdown.wait(), timeout=interval_seconds)
             break
         except asyncio.TimeoutError:
             pass
@@ -543,6 +544,42 @@ async def run_market_stats_loop(shutdown: Shutdown) -> None:
             await update_market_stats()
         except Exception:
             logger.exception("Error in market stats loop")
+
+
+async def run_model_scoring_loop(shutdown: Shutdown) -> None:
+    """Background loop for resolved-market scoring diagnostics."""
+    from apps.collector.jobs.model_scoring import update_daily_model_scoring
+
+    interval_seconds = settings.model_scoring_interval_seconds
+    initial_delay_seconds = settings.model_scoring_initial_delay_seconds
+    logger.info(
+        "Model scoring loop starting "
+        f"(interval={interval_seconds}s, initial_delay={initial_delay_seconds}s)"
+    )
+
+    if initial_delay_seconds > 0:
+        try:
+            await asyncio.wait_for(shutdown.wait(), timeout=initial_delay_seconds)
+            return
+        except asyncio.TimeoutError:
+            pass
+
+    try:
+        await update_daily_model_scoring()
+    except Exception:
+        logger.exception("Error in initial model scoring run")
+
+    while not shutdown.is_set:
+        try:
+            await asyncio.wait_for(shutdown.wait(), timeout=interval_seconds)
+            break
+        except asyncio.TimeoutError:
+            pass
+
+        try:
+            await update_daily_model_scoring()
+        except Exception:
+            logger.exception("Error in model scoring loop")
 
 
 async def _amain() -> None:
@@ -596,6 +633,7 @@ async def _amain() -> None:
         bg_tasks.append(asyncio.create_task(run_volume_spikes_loop(shutdown), name="volume_spikes"))
         bg_tasks.append(asyncio.create_task(run_retention_loop(shutdown), name="retention"))
         bg_tasks.append(asyncio.create_task(run_market_stats_loop(shutdown), name="market_stats"))
+        bg_tasks.append(asyncio.create_task(run_model_scoring_loop(shutdown), name="model_scoring"))
 
     # Create the main sync task
     main_task: Optional[asyncio.Task] = None
@@ -693,6 +731,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-

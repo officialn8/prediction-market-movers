@@ -3,6 +3,9 @@ Market Detail Page - Deep dive into individual markets.
 Supports both Polymarket and Kalshi with source-specific displays.
 """
 
+from html import escape
+from textwrap import dedent
+
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
@@ -10,7 +13,7 @@ from datetime import datetime, timedelta
 
 from packages.core.storage import get_db_pool
 from packages.core.storage.queries import MarketQueries, OHLCQueries
-from apps.dashboard.components import to_user_tz
+from apps.dashboard.components import normalize_market_url, to_user_tz
 
 st.set_page_config(
     page_title="Market Detail | PM Movers",
@@ -129,6 +132,33 @@ def get_source_badge(source: str) -> str:
         return '<span class="source-badge source-kalshi">KALSHI</span>'
     else:
         return '<span class="source-badge source-polymarket">POLYMARKET</span>'
+
+
+def build_market_header_html(
+    *,
+    source_badge: str,
+    category: str,
+    title: str,
+    status: str,
+    ticker_html: str = "",
+    external_link_html: str = "",
+) -> str:
+    """Build dedented/escaped market header HTML block."""
+    return dedent(
+        f"""
+        <div class="market-header">
+            <div style="margin-bottom: 0.75rem;">
+                {source_badge}
+                <span style="color: #71717a; font-size: 0.85rem;">{escape(category)}</span>
+            </div>
+            <h2 class="market-title-large">{escape(title)}</h2>
+            <p style="color: #71717a; margin-bottom: 0.5rem; font-size: 0.85rem;">
+                <strong>Status:</strong> {escape(status.upper())}{ticker_html}
+            </p>
+            {external_link_html}
+        </div>
+        """
+    ).strip()
 
 
 def create_price_chart(data: list[dict], token_outcome: str, use_ohlc: bool = False, show_spread: bool = False) -> go.Figure:
@@ -377,22 +407,17 @@ def main():
     # Market header with source badge
     source_badge = get_source_badge(source)
     
-    # Generate proper URL - prefer stored URL from ingestion
-    market_url = market.get("url") or ""
+    # Generate proper URL - prefer stored URL from ingestion.
+    market_url = normalize_market_url(market.get("url"), source=source)
     if not market_url:
         if is_kalshi and market.get('source_id'):
             # Kalshi URL format
             ticker = market.get('source_id', '')
             series = ticker.split('-')[0].lower() if '-' in ticker else ticker.lower()
-            market_url = f"https://kalshi.com/markets/{series}"
-        elif source.lower() == 'polymarket':
-            # Polymarket URL from slug or source_id (fallback)
-            slug = market.get('slug') or market.get('source_id', '')
-            if slug:
-                # Clean slug - remove any URL prefix if present
-                if 'polymarket.com' in str(slug):
-                    slug = slug.split('/')[-1]
-                market_url = f"https://polymarket.com/event/{slug}"
+            market_url = normalize_market_url(
+                f"https://kalshi.com/markets/{series}",
+                source=source,
+            )
     
     # Get category - for Kalshi, try to infer from title/ticker
     category = market.get('category', '')
@@ -414,20 +439,27 @@ def main():
         else:
             category = 'Uncategorized'
     
-    st.markdown(f"""
-    <div class="market-header">
-        <div style="margin-bottom: 0.75rem;">
-            {source_badge}
-            <span style="color: #71717a; font-size: 0.85rem;">{category}</span>
-        </div>
-        <h2 class="market-title-large">{market['title']}</h2>
-        <p style="color: #71717a; margin-bottom: 0.5rem; font-size: 0.85rem;">
-            <strong>Status:</strong> {market['status'].upper()}
-            {f' | <strong>Ticker:</strong> {market.get("source_id", "N/A")}' if is_kalshi else ''}
-        </p>
-        {'<a href="' + market_url + '" target="_blank" style="color: #5865f2;">View on ' + source.title() + ' →</a>' if market_url else ''}
-    </div>
-    """, unsafe_allow_html=True)
+    ticker_html = ""
+    if is_kalshi:
+        ticker_html = f' | <strong>Ticker:</strong> {escape(str(market.get("source_id") or "N/A"))}'
+
+    external_link_html = ""
+    if market_url:
+        external_link_html = (
+            f'<a href="{escape(market_url, quote=True)}" '
+            f'target="_blank" rel="noopener noreferrer" '
+            f'style="color: #5865f2;">View on {escape(source.title())} →</a>'
+        )
+
+    header_html = build_market_header_html(
+        source_badge=source_badge,
+        category=str(category or "Uncategorized"),
+        title=str(market.get("title") or "Unknown Market"),
+        status=str(market.get("status") or "unknown"),
+        ticker_html=ticker_html,
+        external_link_html=external_link_html,
+    )
+    st.markdown(header_html, unsafe_allow_html=True)
     
     # Token prices and metrics
     tokens = market.get("tokens", [])

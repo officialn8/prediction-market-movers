@@ -41,6 +41,7 @@ services:
     volumes:
       - ./apps/collector:/app/apps/collector
       - ./packages:/app/packages
+      - ./kalshi_private.pem:/app/kalshi_private.pem:ro
     networks:
       - pm_network
     restart: unless-stopped

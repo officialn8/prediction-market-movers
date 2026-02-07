@@ -210,6 +210,22 @@ _instant_scorer = MoverScorer(
     min_quality_score=Decimal(str(settings.instant_mover_min_quality_score)),
 )
 
+
+def _passes_hold_zone(
+    move_edge_pp: Decimal,
+    quality_edge: Optional[Decimal] = None,
+) -> bool:
+    """Suppress borderline trigger candidates while leaving ranking unchanged."""
+    if not settings.signal_hold_zone_enabled:
+        return True
+
+    move_gate = move_edge_pp >= Decimal(str(settings.signal_hold_zone_move_pp))
+    quality_gate = False
+    if quality_edge is not None:
+        quality_gate = quality_edge >= Decimal(str(settings.signal_hold_zone_quality_score))
+
+    return move_gate or quality_gate
+
 async def check_instant_mover(
     token_id: str,
     old_price: float,
@@ -248,9 +264,12 @@ async def check_instant_mover(
     # Quick threshold check
     if abs_move_pp < threshold_pp:
         return None
+
+    move_edge = Decimal(str(abs_move_pp)) - Decimal(str(threshold_pp))
     
     # Calculate quality score if volume available
     quality_score = None
+    quality_edge: Optional[Decimal] = None
     if volume is not None and volume > 0:
         if min_volume and volume < min_volume:
             return None
@@ -260,8 +279,12 @@ async def check_instant_mover(
             volume=Decimal(str(volume)),
         )
         quality_score = float(score)
+        quality_edge = score - Decimal(str(min_quality_score))
         if quality_score < float(min_quality_score):
             return None
+
+    if not _passes_hold_zone(move_edge_pp=move_edge, quality_edge=quality_edge):
+        return None
     
     # Also calculate percentage change for backwards compatibility
     change_pct = (new_price - old_price) / old_price
@@ -287,4 +310,3 @@ async def broadcast_mover_alert(alert: MoverAlert) -> None:
         f"({alert.old_price:.4f} -> {alert.new_price:.4f}){score_str}"
     )
     # TODO: Implement real alerting logic (e.g. insert into alerts table)
-

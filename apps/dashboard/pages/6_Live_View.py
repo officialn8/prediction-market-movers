@@ -6,7 +6,15 @@ from datetime import datetime, timezone
 
 import pandas as pd
 import streamlit as st
-from streamlit_autorefresh import st_autorefresh
+
+try:
+    from streamlit_autorefresh import st_autorefresh
+    AUTOREFRESH_AVAILABLE = True
+except ImportError:
+    AUTOREFRESH_AVAILABLE = False
+
+    def st_autorefresh(*_args, **_kwargs):
+        return None
 
 from apps.dashboard.components import (
     get_watchlist,
@@ -200,6 +208,24 @@ def render_system_health_panel():
                     f"last {format_age(last_age)}"
                 )
 
+        model_scoring = status_entries.get("model_scoring") or {}
+        if model_scoring:
+            st.markdown("---")
+            st.markdown("**Resolved-Market Scoring (Daily)**")
+            score_date = model_scoring.get("score_date", "—")
+            sources = model_scoring.get("sources", {}) or {}
+            overall = sources.get("all")
+
+            if overall:
+                cols = st.columns(4)
+                cols[0].metric("Score Date", score_date)
+                cols[1].metric("Samples", int(overall.get("sample_count", 0)))
+                cols[2].metric("Brier", f"{float(overall.get('brier_score', 0.0)):.4f}")
+                cols[3].metric("Log Loss", f"{float(overall.get('log_loss', 0.0)):.4f}")
+                st.caption(f"Calibration ECE: {float(overall.get('ece', 0.0)):.4f}")
+            else:
+                st.caption(f"Score date: {score_date} | no resolved samples scored yet")
+
 
 def render_live_movers(window_seconds: int, limit: int):
     movers = MarketQueries.get_movers_window(
@@ -369,6 +395,8 @@ def main():
         st.markdown("### Live Settings")
         enable_refresh = st.toggle("Auto refresh", value=True)
         refresh_seconds = st.slider("Refresh interval (seconds)", 2, 30, 5)
+        if enable_refresh and not AUTOREFRESH_AVAILABLE:
+            st.caption("Auto-refresh dependency missing; using manual refresh only.")
         movers_window = st.select_slider(
             "Movers window",
             options=[30, 60, 120, 300, 600],

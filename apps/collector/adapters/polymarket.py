@@ -14,6 +14,7 @@ import logging
 import time
 from dataclasses import dataclass
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import requests
 
@@ -28,6 +29,83 @@ DEFAULT_TIMEOUT = 30
 RATE_LIMIT_DELAY = 0.25  # 250ms between requests to be respectful
 
 
+def _normalize_slug(value: Optional[str]) -> Optional[str]:
+    """Normalize a potential Polymarket slug into a bare path segment."""
+    if value is None:
+        return None
+
+    slug = str(value).strip()
+    if not slug:
+        return None
+
+    # Handle full URLs and path-prefixed values.
+    if "://" in slug or slug.startswith("/"):
+        path = urlparse(slug).path if "://" in slug else slug
+        parts = [part for part in path.split("/") if part]
+        if parts and parts[0] == "event":
+            parts = parts[1:]
+        slug = parts[-1] if parts else ""
+    else:
+        slug = slug.strip("/")
+        if slug.startswith("event/"):
+            slug = slug[len("event/"):]
+        slug = slug.split("/", 1)[0]
+
+    return slug or None
+
+
+def _extract_event_path(value: Optional[str]) -> Optional[str]:
+    """Extract and normalize /event/... path from a Polymarket URL/path."""
+    if value is None:
+        return None
+
+    raw = str(value).strip()
+    if not raw:
+        return None
+
+    path = urlparse(raw).path if "://" in raw else raw
+    segments = [segment for segment in path.split("/") if segment]
+    if len(segments) < 2 or segments[0] != "event":
+        return None
+
+    # Keep only event slug and optional market slug.
+    segments = segments[:3]
+    return "/" + "/".join(segments)
+
+
+def build_canonical_polymarket_url(
+    *,
+    event_slug: Optional[str],
+    market_slug: Optional[str],
+    event_url: Optional[str] = None,
+    raw_url: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Build canonical Polymarket URL.
+
+    Preference order:
+    1) /event/<event_slug>/<market_slug> when both slugs are present and differ
+    2) Valid event path from event_url/raw_url
+    3) /event/<slug> from whichever slug is available
+    """
+    clean_event_slug = _normalize_slug(event_slug)
+    clean_market_slug = _normalize_slug(market_slug)
+
+    if clean_event_slug and clean_market_slug and clean_event_slug != clean_market_slug:
+        return f"https://polymarket.com/event/{clean_event_slug}/{clean_market_slug}"
+
+    for candidate in (event_url, raw_url):
+        normalized_path = _extract_event_path(candidate)
+        if normalized_path:
+            return f"https://polymarket.com{normalized_path}"
+
+    fallback_slug = clean_market_slug or clean_event_slug
+    if fallback_slug:
+        return f"https://polymarket.com/event/{fallback_slug}"
+
+    return None
+
+
 @dataclass
 class PolymarketMarket:
     """Normalized market data from Polymarket."""
@@ -36,6 +114,8 @@ class PolymarketMarket:
     title: str
     slug: str
     event_url: Optional[str]
+    event_slug: Optional[str]
+    market_slug: Optional[str]
     category: Optional[str]
     end_date: Optional[str]
     active: bool
@@ -48,7 +128,11 @@ class PolymarketMarket:
     def url(self) -> str:
         if self.event_url:
             return self.event_url
-        return f"https://polymarket.com/event/{self.slug}"
+        canonical_url = build_canonical_polymarket_url(
+            event_slug=self.event_slug,
+            market_slug=self.market_slug,
+        )
+        return canonical_url or ""
 
     @property
     def is_binary(self) -> bool:
@@ -251,27 +335,19 @@ class PolymarketAdapter:
         # Extract other fields
         question = data.get("question") or data.get("title") or "Unknown"
         question_id = data.get("question_id") or data.get("questionId") or condition_id
-        slug = data.get("slug") or data.get("market_slug") or condition_id
+        market_slug = data.get("slug") or data.get("market_slug")
 
-        # Prefer event-level URL/slug for canonical linking
+        # Prefer event metadata for canonical linking
         event = data.get("event") or {}
         event_url = data.get("event_url") or data.get("eventUrl") or event.get("url")
         event_slug = data.get("event_slug") or data.get("eventSlug") or event.get("slug")
-
-        if event_url:
-            if event_url.startswith("/"):
-                event_url = f"https://polymarket.com{event_url}"
-            elif not event_url.startswith("http"):
-                event_url = f"https://polymarket.com/{event_url.lstrip('/')}"
-        elif event_slug:
-            event_url = f"https://polymarket.com/event/{event_slug}"
-        else:
-            raw_url = data.get("url")
-            if raw_url:
-                if raw_url.startswith("/"):
-                    event_url = f"https://polymarket.com{raw_url}"
-                elif raw_url.startswith("http"):
-                    event_url = raw_url
+        raw_url = data.get("url")
+        canonical_url = build_canonical_polymarket_url(
+            event_slug=event_slug,
+            market_slug=market_slug,
+            event_url=event_url,
+            raw_url=raw_url,
+        )
         
         # Category/tags
         category = None
@@ -325,8 +401,10 @@ class PolymarketAdapter:
             condition_id=condition_id,
             question_id=question_id,
             title=question,
-            slug=slug,
-            event_url=event_url,
+            slug=str(market_slug or event_slug or ""),
+            event_url=canonical_url,
+            event_slug=_normalize_slug(event_slug),
+            market_slug=_normalize_slug(market_slug),
             category=category,
             end_date=data.get("end_date_iso") or data.get("endDate"),
             active=data.get("active", True),

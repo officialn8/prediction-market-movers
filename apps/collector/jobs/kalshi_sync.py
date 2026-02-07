@@ -43,6 +43,26 @@ def get_sync_state() -> KalshiSyncState:
     return _sync_state
 
 
+def _normalize_resolved_outcome(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip().upper()
+    if text in {"YES", "Y", "TRUE", "1"}:
+        return "YES"
+    if text in {"NO", "N", "FALSE", "0"}:
+        return "NO"
+    return None
+
+
+def _map_market_status(status: Optional[str]) -> str:
+    text = str(status or "").strip().lower()
+    if text in {"settled", "resolved"}:
+        return "resolved"
+    if text == "active":
+        return "active"
+    return "closed"
+
+
 def _build_ticker_maps() -> None:
     """Build maps from Kalshi tickers to our DB IDs."""
     state = get_sync_state()
@@ -100,15 +120,32 @@ def sync_markets(adapter: KalshiAdapter, max_markets: int = MAX_MARKETS) -> int:
             
             if existing:
                 market_id = existing[0]["market_id"]
+                market_status = _map_market_status(market.status)
+                resolved_outcome = (
+                    _normalize_resolved_outcome(market.result)
+                    if market_status == "resolved"
+                    else None
+                )
                 db.execute("""
                     UPDATE markets SET
                         title = %s,
                         status = %s,
+                        resolved_outcome = CASE
+                            WHEN %s = 'resolved' THEN COALESCE(%s, resolved_outcome)
+                            ELSE NULL
+                        END,
+                        resolved_at = CASE
+                            WHEN %s = 'resolved' THEN COALESCE(resolved_at, NOW())
+                            ELSE NULL
+                        END,
                         updated_at = NOW()
                     WHERE market_id = %s
                 """, (
                     market.title[:500] if market.title else "Unknown",
-                    "active" if market.status == "active" else "closed",
+                    market_status,
+                    market_status,
+                    resolved_outcome,
+                    market_status,
                     market_id,
                 ))
             else:
@@ -116,18 +153,28 @@ def sync_markets(adapter: KalshiAdapter, max_markets: int = MAX_MARKETS) -> int:
                 market_id = uuid4()
                 # Use category from market (from event), fallback to Politics
                 category = market.category if hasattr(market, 'category') and market.category else "Politics"
+                market_status = _map_market_status(market.status)
+                resolved_outcome = (
+                    _normalize_resolved_outcome(market.result)
+                    if market_status == "resolved"
+                    else None
+                )
                 db.execute("""
                     INSERT INTO markets (
-                        market_id, source, source_id, title, category, status, url
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        market_id, source, source_id, title, category, status, url,
+                        resolved_outcome, resolved_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
+                        CASE WHEN %s = 'resolved' THEN NOW() ELSE NULL END)
                 """, (
                     market_id,
                     SOURCE_NAME,
                     market.ticker,
                     market.title[:500] if market.title else "Unknown",
                     category,
-                    "active" if market.status == "active" else "closed",
+                    market_status,
                     market.url,
+                    resolved_outcome,
+                    market_status,
                 ))
                 
                 # Insert YES token (using market_tokens table)

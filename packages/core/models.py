@@ -224,9 +224,10 @@ class Alert(BaseModel):
     move_pp: Decimal
     threshold_pp: Decimal
     reason: str
+    alert_type: Optional[str] = None
+    volume_spike_ratio: Optional[Decimal] = None
     acknowledged_at: Optional[datetime] = None
     
     class Config:
         from_attributes = True
-
 
