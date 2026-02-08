@@ -138,7 +138,11 @@ def get_live_tape(seconds: int, limit: int, source: str | None = None) -> list[d
         SELECT
             s.ts,
             s.price,
-            s.volume_24h,
+            CASE
+                WHEN s.volume_24h IS NOT NULL THEN s.volume_24h
+                WHEN lv.has_volume_data THEN lv.volume_24h
+                ELSE NULL
+            END AS volume_24h,
             s.spread,
             mt.outcome,
             mt.market_id,
@@ -148,6 +152,14 @@ def get_live_tape(seconds: int, limit: int, source: str | None = None) -> list[d
         FROM snapshots s
         JOIN market_tokens mt ON mt.token_id = s.token_id
         JOIN markets m ON m.market_id = mt.market_id
+        LEFT JOIN LATERAL (
+            SELECT
+                v.volume_24h,
+                v.has_volume_data
+            FROM v_latest_volumes v
+            WHERE v.token_id = s.token_id
+            LIMIT 1
+        ) lv ON TRUE
         WHERE s.ts > NOW() - (%s * INTERVAL '1 second')
           AND m.status = 'active'
           {source_clause}
@@ -253,12 +265,29 @@ def get_live_movers(window_seconds: int, limit: int, source: str | None = None) 
     source_filter = _normalize_source_filter(source)
     cached_window = _cached_window_for_live_movers(window_seconds)
     if source_filter:
-        return AnalyticsQueries.get_cached_movers(
+        cached_movers = AnalyticsQueries.get_cached_movers(
             window_seconds=cached_window,
             limit=limit,
             direction="both",
             source=source_filter,
         )
+        if cached_movers:
+            return cached_movers
+
+        # Fallback to direct movers query so one venue does not disappear when
+        # the latest cache batch has no qualifying rows for that source.
+        fallback_rows = MarketQueries.get_movers_window(
+            window_seconds=window_seconds,
+            limit=limit,
+            source=source_filter,
+            direction="both",
+            statement_timeout_ms=3500,
+        )
+        for row in fallback_rows:
+            if row.get("move_pp") is None and row.get("pct_change") is not None:
+                row["move_pp"] = row.get("pct_change")
+            row["_live_fallback"] = True
+        return fallback_rows
     return get_live_movers_balanced(window_seconds=window_seconds, limit=limit)
 
 
@@ -389,6 +418,11 @@ def render_live_movers(window_seconds: int, limit: int, source: str | None = Non
         else:
             st.info(f"No cached movers yet (window {cached_window}s).")
         return
+    if any(bool(m.get("_live_fallback")) for m in movers):
+        if source:
+            st.caption(f"Using live {source.title()} movers fallback (cache empty).")
+        else:
+            st.caption("Using live movers fallback (cache empty).")
     for mover in movers:
         render_mover_card(mover, show_watchlist=False)
 
