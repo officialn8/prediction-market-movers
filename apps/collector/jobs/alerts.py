@@ -87,13 +87,22 @@ async def run_alerts_check() -> None:
     logger.info("Running alerts check...")
 
     try:
-        # Get top movers for analysis
+        # Prefer cached movers for stability/performance in background alerts.
         movers = await asyncio.to_thread(
-            MarketQueries.get_top_movers,
-            hours=ALERT_WINDOW_HOURS,
+            AnalyticsQueries.get_cached_movers,
+            window_seconds=ALERT_WINDOW_HOURS * 3600,
             limit=100,
-            direction="both"
+            direction="both",
         )
+
+        # Fallback to raw query only if cache is empty.
+        if not movers:
+            movers = await asyncio.to_thread(
+                MarketQueries.get_top_movers,
+                hours=ALERT_WINDOW_HOURS,
+                limit=100,
+                direction="both",
+            )
 
         # Get volume spike data for enrichment
         volume_spike_map = {}

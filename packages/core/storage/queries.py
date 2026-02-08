@@ -457,7 +457,12 @@ class MarketQueries:
                 SELECT
                     mt.token_id,
                     mt.market_id,
-                    mt.outcome
+                    mt.outcome,
+                    m.title,
+                    m.source,
+                    m.category,
+                    m.source_id,
+                    m.url
                 FROM market_tokens mt
                 JOIN markets m ON mt.market_id = m.market_id
                 WHERE m.status = 'active'
@@ -465,18 +470,42 @@ class MarketQueries:
                   {category_filter}
                   {expiry_filter}
             ),
-            latest AS (
-                SELECT DISTINCT ON (s.token_id)
-                    s.token_id,
-                    s.ts as latest_ts,
-                    s.price as latest_price
-                FROM snapshots s
-                JOIN scoped_tokens st ON st.token_id = s.token_id
-                ORDER BY s.token_id, s.ts DESC
+            token_prices AS (
+                SELECT
+                    st.token_id,
+                    st.market_id,
+                    st.outcome,
+                    st.title,
+                    st.source,
+                    st.category,
+                    st.source_id,
+                    st.url,
+                    latest.latest_ts,
+                    latest.latest_price,
+                    historical.old_price
+                FROM scoped_tokens st
+                JOIN LATERAL (
+                    SELECT
+                        s.ts as latest_ts,
+                        s.price as latest_price
+                    FROM snapshots s
+                    WHERE s.token_id = st.token_id
+                    ORDER BY s.ts DESC
+                    LIMIT 1
+                ) latest ON TRUE
+                JOIN LATERAL (
+                    SELECT
+                        s.price as old_price
+                    FROM snapshots s
+                    WHERE s.token_id = st.token_id
+                      AND s.ts <= NOW() - (%s * INTERVAL '1 second')
+                    ORDER BY s.ts DESC
+                    LIMIT 1
+                ) historical ON TRUE
             ),
             latest_volumes AS (
                 -- Get latest volume with WSS preference for scoped tokens only.
-                SELECT 
+                SELECT
                     v.token_id,
                     v.volume_24h as latest_volume,
                     v.volume_source,
@@ -487,42 +516,28 @@ class MarketQueries:
                   AND v.is_volume_fresh = true
                   AND {_volume_freshness_clause("v")}
             ),
-            historical AS (
-                SELECT DISTINCT ON (s.token_id)
-                    s.token_id,
-                    s.price as old_price
-                FROM snapshots s
-                JOIN scoped_tokens st ON st.token_id = s.token_id
-                WHERE s.ts <= NOW() - (%s * INTERVAL '1 second')
-                ORDER BY s.token_id, s.ts DESC
-            ),
             changes AS (
                 SELECT
-                    l.token_id,
-                    l.latest_ts,
-                    l.latest_price,
+                    tp.token_id,
+                    tp.latest_ts,
+                    tp.latest_price,
                     COALESCE(lv.latest_volume, 0) as latest_volume,
                     lv.volume_source,
                     lv.wss_trade_count,
-                    h.old_price,
-                    -- Use percentage points (pp) instead of percentage change
-                    ROUND(((l.latest_price - h.old_price) * 100)::numeric, 2) as pct_change
-                FROM latest l
-                JOIN historical h ON l.token_id = h.token_id
-                LEFT JOIN latest_volumes lv ON l.token_id = lv.token_id
+                    tp.old_price,
+                    ROUND(((tp.latest_price - tp.old_price) * 100)::numeric, 2) as pct_change,
+                    tp.market_id,
+                    tp.outcome,
+                    tp.title,
+                    tp.source,
+                    tp.category,
+                    tp.source_id,
+                    tp.url
+                FROM token_prices tp
+                LEFT JOIN latest_volumes lv ON tp.token_id = lv.token_id
             )
-            SELECT
-                c.*,
-                st.market_id,
-                st.outcome,
-                m.title,
-                m.source,
-                m.category,
-                m.source_id,
-                m.url
-            FROM changes c
-            JOIN scoped_tokens st ON c.token_id = st.token_id
-            JOIN markets m ON st.market_id = m.market_id
+            SELECT *
+            FROM changes
             WHERE 1 = 1
               {direction_filter}
             ORDER BY {order}
@@ -536,9 +551,9 @@ class MarketQueries:
             params.append(category)
         params.extend(
             [
+                window_seconds,
                 settings.volume_wss_stale_after_seconds,
                 settings.volume_provider_stale_after_seconds,
-                window_seconds,
             ]
         )
         params.append(limit)
