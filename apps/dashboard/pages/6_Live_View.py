@@ -405,7 +405,7 @@ def render_live_tape(seconds: int, limit: int, source: str | None = None):
     df = pd.DataFrame(rows)
     df["ts"] = df["ts"].apply(to_user_tz)
     df["price"] = df["price"].astype(float)
-    df["volume_24h"] = df["volume_24h"].fillna(0).astype(float)
+    df["volume_24h"] = pd.to_numeric(df["volume_24h"], errors="coerce").fillna(0.0)
     df["source"] = df["source"].str.upper()
 
     st.dataframe(
