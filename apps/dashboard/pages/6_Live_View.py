@@ -539,7 +539,7 @@ def render_watchlist_tiles(delta_minutes: int, limit: int):
             if st.button(
                 "View Details",
                 key=f"live_watch_{market.get('market_id')}",
-                use_container_width=True,
+                width="stretch",
             ):
                 st.switch_page("pages/2_Market_Detail.py")
 
