@@ -3,6 +3,7 @@ Raw SQL queries for market data operations.
 Centralized query definitions for consistency and maintainability.
 """
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -11,6 +12,8 @@ from uuid import UUID
 
 from packages.core.settings import settings
 from packages.core.storage.db import get_db_pool
+
+logger = logging.getLogger(__name__)
 
 
 def _volume_freshness_clause(alias: str = "v") -> str:
@@ -390,7 +393,22 @@ class MarketQueries:
             params.append(category)
         params.append(limit)
 
-        return db.execute(query, tuple(params), fetch=True) or []
+        try:
+            return db.execute(
+                query,
+                tuple(params),
+                fetch=True,
+                statement_timeout_ms=4500,
+            ) or []
+        except Exception as e:
+            logger.warning(
+                "get_top_movers query failed (hours=%s, source=%s, category=%s): %s",
+                hours,
+                source,
+                category,
+                e,
+            )
+            return []
 
     @staticmethod
     def get_movers_window(
@@ -433,33 +451,48 @@ class MarketQueries:
         expiry_filter = "AND (m.end_date IS NULL OR m.end_date > NOW() + INTERVAL '24 hours')"
 
         query = f"""
-            WITH latest AS (
-                SELECT DISTINCT ON (token_id)
-                    token_id,
-                    ts as latest_ts,
-                    price as latest_price
-                FROM snapshots
-                ORDER BY token_id, ts DESC
+            WITH scoped_tokens AS (
+                SELECT
+                    mt.token_id,
+                    mt.market_id,
+                    mt.outcome
+                FROM market_tokens mt
+                JOIN markets m ON mt.market_id = m.market_id
+                WHERE m.status = 'active'
+                  {source_filter}
+                  {category_filter}
+                  {expiry_filter}
+            ),
+            latest AS (
+                SELECT DISTINCT ON (s.token_id)
+                    s.token_id,
+                    s.ts as latest_ts,
+                    s.price as latest_price
+                FROM snapshots s
+                JOIN scoped_tokens st ON st.token_id = s.token_id
+                ORDER BY s.token_id, s.ts DESC
             ),
             latest_volumes AS (
-                -- Get latest volume with WSS preference
+                -- Get latest volume with WSS preference for scoped tokens only.
                 SELECT 
-                    token_id,
-                    volume_24h as latest_volume,
-                    volume_source,
-                    wss_trade_count
-                FROM v_latest_volumes
-                WHERE has_volume_data = true
-                  AND is_volume_fresh = true
-                  AND {_volume_freshness_clause("v_latest_volumes")}
+                    v.token_id,
+                    v.volume_24h as latest_volume,
+                    v.volume_source,
+                    v.wss_trade_count
+                FROM v_latest_volumes v
+                JOIN scoped_tokens st ON st.token_id = v.token_id
+                WHERE v.has_volume_data = true
+                  AND v.is_volume_fresh = true
+                  AND {_volume_freshness_clause("v")}
             ),
             historical AS (
-                SELECT DISTINCT ON (token_id)
-                    token_id,
-                    price as old_price
-                FROM snapshots
-                WHERE ts <= NOW() - (%s * INTERVAL '1 second')
-                ORDER BY token_id, ts DESC
+                SELECT DISTINCT ON (s.token_id)
+                    s.token_id,
+                    s.price as old_price
+                FROM snapshots s
+                JOIN scoped_tokens st ON st.token_id = s.token_id
+                WHERE s.ts <= NOW() - (%s * INTERVAL '1 second')
+                ORDER BY s.token_id, s.ts DESC
             ),
             changes AS (
                 SELECT
@@ -478,37 +511,52 @@ class MarketQueries:
             )
             SELECT
                 c.*,
-                mt.market_id,
-                mt.outcome,
+                st.market_id,
+                st.outcome,
                 m.title,
                 m.source,
                 m.category,
                 m.source_id,
                 m.url
             FROM changes c
-            JOIN market_tokens mt ON c.token_id = mt.token_id
-            JOIN markets m ON mt.market_id = m.market_id
-            WHERE m.status = 'active'
-              {source_filter}
-              {category_filter}
+            JOIN scoped_tokens st ON c.token_id = st.token_id
+            JOIN markets m ON st.market_id = m.market_id
+            WHERE 1 = 1
               {direction_filter}
-              {expiry_filter}
             ORDER BY {order}
             LIMIT %s
         """
 
-        params = [
-            settings.volume_wss_stale_after_seconds,
-            settings.volume_provider_stale_after_seconds,
-            window_seconds,
-        ]
+        params: list[object] = []
         if source:
             params.append(source)
         if category:
             params.append(category)
+        params.extend(
+            [
+                settings.volume_wss_stale_after_seconds,
+                settings.volume_provider_stale_after_seconds,
+                window_seconds,
+            ]
+        )
         params.append(limit)
 
-        return db.execute(query, tuple(params), fetch=True) or []
+        try:
+            return db.execute(
+                query,
+                tuple(params),
+                fetch=True,
+                statement_timeout_ms=4500,
+            ) or []
+        except Exception as e:
+            logger.warning(
+                "get_movers_window query failed (window=%ss, source=%s, category=%s): %s",
+                window_seconds,
+                source,
+                category,
+                e,
+            )
+            return []
 
     @staticmethod
     def get_markets_batch_with_prices(market_ids: list[str]) -> list[dict]:

@@ -124,7 +124,17 @@ def get_live_tape(seconds: int, limit: int, source: str | None = None) -> list[d
     source_clause = "AND m.source = %s" if source_filter else ""
 
     query = f"""
-        WITH latest AS (
+        WITH scoped_tokens AS (
+            SELECT
+                mt.token_id,
+                mt.outcome,
+                mt.market_id
+            FROM market_tokens mt
+            JOIN markets m ON mt.market_id = m.market_id
+            WHERE 1 = 1
+              {source_clause}
+        ),
+        latest AS (
             SELECT DISTINCT ON (s.token_id)
                 s.token_id,
                 s.ts,
@@ -132,6 +142,7 @@ def get_live_tape(seconds: int, limit: int, source: str | None = None) -> list[d
                 s.volume_24h,
                 s.spread
             FROM snapshots s
+            JOIN scoped_tokens st ON st.token_id = s.token_id
             ORDER BY s.token_id, s.ts DESC
         )
         SELECT
@@ -139,24 +150,32 @@ def get_live_tape(seconds: int, limit: int, source: str | None = None) -> list[d
             l.price,
             l.volume_24h,
             l.spread,
-            mt.outcome,
-            mt.market_id,
+            st.outcome,
+            st.market_id,
             m.title,
             m.source,
             m.category
         FROM latest l
-        JOIN market_tokens mt ON l.token_id = mt.token_id
-        JOIN markets m ON mt.market_id = m.market_id
+        JOIN scoped_tokens st ON l.token_id = st.token_id
+        JOIN markets m ON st.market_id = m.market_id
         WHERE l.ts > NOW() - (%s * INTERVAL '1 second')
-        {source_clause}
         ORDER BY l.ts DESC
         LIMIT %s
     """
-    params: list[object] = [seconds]
+    params: list[object] = []
     if source_filter:
         params.append(source_filter)
+    params.append(seconds)
     params.append(sample_limit)
-    rows = db.execute(query, tuple(params), fetch=True) or []
+    try:
+        rows = db.execute(
+            query,
+            tuple(params),
+            fetch=True,
+            statement_timeout_ms=4000,
+        ) or []
+    except Exception:
+        return []
     if source_filter:
         return rows[:limit]
     return balance_rows_by_source(rows, limit)

@@ -123,6 +123,7 @@ class DatabasePool:
         query: str,
         params: Optional[tuple] = None,
         fetch: bool = False,
+        statement_timeout_ms: Optional[int] = None,
     ) -> Optional[list[dict]]:
         """
         Execute a query with optional parameter binding.
@@ -131,11 +132,14 @@ class DatabasePool:
             query: SQL query string
             params: Optional tuple of parameters
             fetch: If True, return fetched results
+            statement_timeout_ms: Optional per-statement timeout (milliseconds)
             
         Returns:
             List of dicts if fetch=True, else None
         """
         with self.get_cursor() as cur:
+            if statement_timeout_ms is not None:
+                cur.execute("SET LOCAL statement_timeout = %s", (int(statement_timeout_ms),))
             cur.execute(query, params)
             if fetch:
                 return cur.fetchall()
@@ -226,4 +230,3 @@ def reset_db_pool() -> None:
     if _db_pool is not None:
         _db_pool.close()
         _db_pool = None
-
