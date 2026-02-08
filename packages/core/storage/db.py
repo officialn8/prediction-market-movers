@@ -139,7 +139,10 @@ class DatabasePool:
         """
         with self.get_cursor() as cur:
             if statement_timeout_ms is not None:
-                cur.execute("SET LOCAL statement_timeout = %s", (int(statement_timeout_ms),))
+                cur.execute(
+                    "SELECT set_config('statement_timeout', %s, true)",
+                    (f"{int(statement_timeout_ms)}ms",),
+                )
             cur.execute(query, params)
             if fetch:
                 return cur.fetchall()
