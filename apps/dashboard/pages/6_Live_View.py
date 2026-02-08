@@ -130,60 +130,40 @@ def _cached_window_for_live_movers(window_seconds: int) -> int:
 def get_live_tape(seconds: int, limit: int, source: str | None = None) -> list[dict]:
     """Fetch latest per-token snapshots within the time window."""
     db = get_db_pool()
-    sample_limit = max(limit * 20, 400)
+    sample_limit = max(limit * 12, 240)
     source_filter = _normalize_source_filter(source)
     source_clause = "AND m.source = %s" if source_filter else ""
 
     query = f"""
-        WITH scoped_tokens AS (
-            SELECT
-                mt.token_id,
-                mt.outcome,
-                mt.market_id
-            FROM market_tokens mt
-            JOIN markets m ON mt.market_id = m.market_id
-            WHERE 1 = 1
-              {source_clause}
-        ),
-        latest AS (
-            SELECT DISTINCT ON (s.token_id)
-                s.token_id,
-                s.ts,
-                s.price,
-                s.volume_24h,
-                s.spread
-            FROM snapshots s
-            JOIN scoped_tokens st ON st.token_id = s.token_id
-            ORDER BY s.token_id, s.ts DESC
-        )
         SELECT
-            l.ts,
-            l.price,
-            l.volume_24h,
-            l.spread,
-            st.outcome,
-            st.market_id,
+            s.ts,
+            s.price,
+            s.volume_24h,
+            s.spread,
+            mt.outcome,
+            mt.market_id,
             m.title,
             m.source,
             m.category
-        FROM latest l
-        JOIN scoped_tokens st ON l.token_id = st.token_id
-        JOIN markets m ON st.market_id = m.market_id
-        WHERE l.ts > NOW() - (%s * INTERVAL '1 second')
-        ORDER BY l.ts DESC
+        FROM snapshots s
+        JOIN market_tokens mt ON mt.token_id = s.token_id
+        JOIN markets m ON m.market_id = mt.market_id
+        WHERE s.ts > NOW() - (%s * INTERVAL '1 second')
+          AND m.status = 'active'
+          {source_clause}
+        ORDER BY s.ts DESC
         LIMIT %s
     """
-    params: list[object] = []
+    params: list[object] = [seconds]
     if source_filter:
         params.append(source_filter)
-    params.append(seconds)
     params.append(sample_limit)
     try:
         rows = db.execute(
             query,
             tuple(params),
             fetch=True,
-            statement_timeout_ms=4000,
+            statement_timeout_ms=3000,
         ) or []
     except Exception:
         return []
