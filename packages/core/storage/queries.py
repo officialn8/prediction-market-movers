@@ -838,10 +838,12 @@ class AnalyticsQueries:
         unconverged_only: bool = False,
         dedupe_market_events: bool = True,
         exclude_expired: bool = True,
+        source: Optional[str] = None,
     ) -> list[dict]:
         """Get recent alerts with optional market-level dedupe and expiry filtering."""
         db = get_db_pool()
         ack_filter = "a.acknowledged_at IS NULL" if unconverged_only else "1 = 1"
+        source_filter = "AND m.source = %s" if source else ""
         expiry_filter = (
             "AND (m.end_date IS NULL OR m.end_date > a.created_at)"
             if exclude_expired
@@ -887,6 +889,7 @@ class AnalyticsQueries:
                     LIMIT 1
                 ) svl ON TRUE
                 WHERE {ack_filter}
+                  {source_filter}
                   {expiry_filter}
             ),
             ranked AS (
@@ -914,7 +917,11 @@ class AnalyticsQueries:
             ORDER BY created_at DESC
             LIMIT %s
         """
-        return db.execute(query, (limit,), fetch=True) or []
+        params: list[object] = []
+        if source:
+            params.append(source)
+        params.append(limit)
+        return db.execute(query, tuple(params), fetch=True) or []
 
     @staticmethod
     def get_recent_alert_for_token(

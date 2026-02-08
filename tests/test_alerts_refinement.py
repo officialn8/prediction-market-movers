@@ -44,6 +44,17 @@ def test_get_recent_alerts_dedupes_market_events_and_excludes_expired(monkeypatc
     assert "volume_at_alert" in query
 
 
+def test_get_recent_alerts_applies_source_filter(monkeypatch):
+    fake_db = QueryCaptureDB(rows=[])
+    monkeypatch.setattr(queries, "get_db_pool", lambda: fake_db)
+
+    AnalyticsQueries.get_recent_alerts(limit=10, source="kalshi")
+
+    query, params, _, _ = fake_db.calls[-1]
+    assert "AND m.source = %s" in query
+    assert params[0] == "kalshi"
+
+
 def test_get_recent_alert_for_market_supports_alert_type_filter(monkeypatch):
     fake_db = QueryCaptureDB(rows=[])
     monkeypatch.setattr(queries, "get_db_pool", lambda: fake_db)

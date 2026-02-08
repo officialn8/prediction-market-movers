@@ -41,7 +41,7 @@ def compute_volume_at_alert(alert: dict) -> float | None:
 
 
 def render_filters():
-    col1, col2, col3, col4 = st.columns([2, 2, 2, 3])
+    col1, col2, col3, col4, col5 = st.columns([2, 2, 2, 2, 3])
     with col1:
         limit = st.slider("Alerts to show", 10, 200, 50, step=10)
     with col2:
@@ -53,6 +53,12 @@ def render_filters():
     with col3:
         unack_only = st.toggle("Unacknowledged only", value=False)
     with col4:
+        source = st.selectbox(
+            "Source",
+            options=["All", "Kalshi", "Polymarket"],
+            index=0,
+        )
+    with col5:
         hours = st.selectbox(
             "Time window",
             options=[1, 3, 6, 12, 24, 72, "All"],
@@ -62,16 +68,21 @@ def render_filters():
         "limit": limit,
         "min_severity": min_severity,
         "unack_only": unack_only,
+        "source": source,
         "hours": hours,
     }
 
 
-def get_alerts_data(limit: int, unack_only: bool) -> list[dict]:
+def get_alerts_data(limit: int, unack_only: bool, source: str) -> list[dict]:
+    source_filter = source.lower() if source != "All" else None
+    # Fetch a wider pool only when source is not constrained, then apply UI filters.
+    query_limit = limit if source_filter else min(limit * 4, 1000)
     return AnalyticsQueries.get_recent_alerts(
-        limit=limit,
+        limit=query_limit,
         unconverged_only=unack_only,
         dedupe_market_events=True,
         exclude_expired=True,
+        source=source_filter,
     )
 
 
@@ -185,7 +196,7 @@ def render_alerts_table(df: pd.DataFrame):
 
 
 filters = render_filters()
-alerts = get_alerts_data(filters["limit"], filters["unack_only"])
+alerts = get_alerts_data(filters["limit"], filters["unack_only"], filters["source"])
 
 if not alerts:
     st.info("No alerts found.")
@@ -193,6 +204,8 @@ else:
     df = normalize_alerts(alerts)
     df = apply_filters(df, filters["min_severity"], filters["hours"])
     df = render_source_filter(df)
+    if len(df) > filters["limit"]:
+        df = df.head(filters["limit"])
     render_alerts_table(df)
 
 with st.expander("Next to implement"):
