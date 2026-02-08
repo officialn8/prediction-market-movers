@@ -417,6 +417,7 @@ class MarketQueries:
         source: Optional[str] = None,
         category: Optional[str] = None,
         direction: str = "both",
+        statement_timeout_ms: int = 4500,
     ) -> list[dict]:
         """
         Get top price movers over an arbitrary time window in seconds.
@@ -431,6 +432,7 @@ class MarketQueries:
             source: Optional source filter
             category: Optional category filter  
             direction: 'both', 'gainers', or 'losers'
+            statement_timeout_ms: Per-query timeout applied in the DB session
         """
         db = get_db_pool()
 
@@ -546,7 +548,7 @@ class MarketQueries:
                 query,
                 tuple(params),
                 fetch=True,
-                statement_timeout_ms=4500,
+                statement_timeout_ms=statement_timeout_ms,
             ) or []
         except Exception as e:
             logger.warning(
@@ -897,51 +899,53 @@ class AnalyticsQueries:
         else:
             direction_filter = ""
             
-        # Get the latest cached batch for this window
-        # Now includes volume_24h and spike_ratio from cache for consistent display
+        # Use latest cache batch first, then do per-row volume fallback with LATERAL.
+        # This avoids an expensive full-table DISTINCT ON over snapshots.
         query = f"""
             WITH latest_batch AS (
                 SELECT MAX(as_of_ts) as max_ts
                 FROM movers_cache
                 WHERE window_seconds = %s
             ),
-            latest_volume AS (
-                -- Fallback: Get latest NON-NULL volume if not in cache
-                SELECT DISTINCT ON (token_id)
-                    token_id,
-                    volume_24h as latest_volume
-                FROM snapshots
-                WHERE volume_24h IS NOT NULL
-                ORDER BY token_id, ts DESC
+            base AS (
+                SELECT
+                    mc.*,
+                    mc.move_pp as pct_change, -- Alias for compat
+                    mc.price_now as latest_price,
+                    mc.price_then as old_price,
+                    mc.spike_ratio as cached_spike_ratio,
+                    mt.market_id,
+                    mt.outcome,
+                    mt.symbol,
+                    m.title,
+                    m.source,
+                    m.category,
+                    m.source_id,
+                    m.url
+                FROM movers_cache mc
+                JOIN latest_batch lb ON mc.as_of_ts = lb.max_ts
+                JOIN market_tokens mt ON mc.token_id = mt.token_id
+                JOIN markets m ON mt.market_id = m.market_id
+                WHERE mc.window_seconds = %s
+                  {source_filter}
+                  {category_filter}
+                  {direction_filter}
+                ORDER BY mc.rank ASC -- Pre-calculated rank
+                LIMIT %s
             )
-            SELECT 
-                mc.*,
-                mc.move_pp as pct_change, -- Alias for compat
-                mc.price_now as latest_price,
-                mc.price_then as old_price,
-                -- Use cached volume if available, else fallback to snapshot
-                COALESCE(mc.volume_24h, lv.latest_volume, 0) as latest_volume,
-                -- Expose spike_ratio directly from cache
-                mc.spike_ratio as cached_spike_ratio,
-                mt.market_id,
-                mt.outcome,
-                mt.symbol,
-                m.title,
-                m.source,
-                m.category,
-                m.source_id,
-                m.url
-            FROM movers_cache mc
-            JOIN latest_batch lb ON mc.as_of_ts = lb.max_ts
-            JOIN market_tokens mt ON mc.token_id = mt.token_id
-            JOIN markets m ON mt.market_id = m.market_id
-            LEFT JOIN latest_volume lv ON mc.token_id = lv.token_id
-            WHERE mc.window_seconds = %s
-              {source_filter}
-              {category_filter}
-              {direction_filter}
-            ORDER BY mc.rank ASC -- Pre-calculated rank
-            LIMIT %s
+            SELECT
+                b.*,
+                COALESCE(b.volume_24h, lv.latest_volume, 0) as latest_volume
+            FROM base b
+            LEFT JOIN LATERAL (
+                SELECT s.volume_24h as latest_volume
+                FROM snapshots s
+                WHERE s.token_id = b.token_id
+                  AND s.volume_24h IS NOT NULL
+                ORDER BY s.ts DESC
+                LIMIT 1
+            ) lv ON TRUE
+            ORDER BY b.rank ASC
         """
         
         params = [window_seconds, window_seconds]
@@ -951,7 +955,22 @@ class AnalyticsQueries:
             params.append(category)
         params.append(limit)
 
-        return db.execute(query, tuple(params), fetch=True) or []
+        try:
+            return db.execute(
+                query,
+                tuple(params),
+                fetch=True,
+                statement_timeout_ms=3500,
+            ) or []
+        except Exception as e:
+            logger.warning(
+                "get_cached_movers query failed (window=%ss, source=%s, category=%s): %s",
+                window_seconds,
+                source,
+                category,
+                e,
+            )
+            return []
 
 
 @dataclass

@@ -116,6 +116,17 @@ def _normalize_source_filter(source: str | None) -> str | None:
     return None
 
 
+def _cached_window_for_live_movers(window_seconds: int) -> int:
+    """Map requested live window to available movers-cache windows."""
+    if window_seconds <= 300:
+        return 300
+    if window_seconds <= 900:
+        return 900
+    if window_seconds <= 3600:
+        return 3600
+    return 86400
+
+
 def get_live_tape(seconds: int, limit: int, source: str | None = None) -> list[dict]:
     """Fetch latest per-token snapshots within the time window."""
     db = get_db_pool()
@@ -226,15 +237,16 @@ def get_live_movers_balanced(window_seconds: int, limit: int) -> list[dict]:
     if limit <= 0:
         return []
 
+    cached_window = _cached_window_for_live_movers(window_seconds)
     per_source_limit = max(1, limit // 2)
-    kalshi = MarketQueries.get_movers_window(
-        window_seconds=window_seconds,
+    kalshi = AnalyticsQueries.get_cached_movers(
+        window_seconds=cached_window,
         limit=limit,
         direction="both",
         source="kalshi",
     )
-    polymarket = MarketQueries.get_movers_window(
-        window_seconds=window_seconds,
+    polymarket = AnalyticsQueries.get_cached_movers(
+        window_seconds=cached_window,
         limit=limit,
         direction="both",
         source="polymarket",
@@ -259,9 +271,10 @@ def get_live_movers_balanced(window_seconds: int, limit: int) -> list[dict]:
 def get_live_movers(window_seconds: int, limit: int, source: str | None = None) -> list[dict]:
     """Fetch movers for a specific venue, or balanced across venues."""
     source_filter = _normalize_source_filter(source)
+    cached_window = _cached_window_for_live_movers(window_seconds)
     if source_filter:
-        return MarketQueries.get_movers_window(
-            window_seconds=window_seconds,
+        return AnalyticsQueries.get_cached_movers(
+            window_seconds=cached_window,
             limit=limit,
             direction="both",
             source=source_filter,
@@ -390,10 +403,11 @@ def render_system_health_panel():
 def render_live_movers(window_seconds: int, limit: int, source: str | None = None):
     movers = get_live_movers(window_seconds=window_seconds, limit=limit, source=source)
     if not movers:
+        cached_window = _cached_window_for_live_movers(window_seconds)
         if source:
-            st.info(f"No recent {source.title()} movers yet.")
+            st.info(f"No recent {source.title()} cached movers yet (window {cached_window}s).")
         else:
-            st.info("No live movers yet. Wait for more real-time data.")
+            st.info(f"No cached movers yet (window {cached_window}s).")
         return
     for mover in movers:
         render_mover_card(mover, show_watchlist=False)

@@ -107,13 +107,29 @@ async def update_movers_cache() -> None:
 
     for window in WINDOWS:
         try:
+            timeout_ms = 8000 if window <= 900 else 15000 if window <= 3600 else 30000
+
             # Fetch raw movers from query
             raw_movers = await asyncio.to_thread(
                 MarketQueries.get_movers_window,
                 window_seconds=window,
                 limit=500,
                 direction="both",
+                statement_timeout_ms=timeout_ms,
             )
+
+            # Fallback to last cached batch so dashboards still have usable movers.
+            if not raw_movers:
+                logger.warning(
+                    "No raw movers returned for %ss window; falling back to prior cached movers",
+                    window,
+                )
+                raw_movers = await asyncio.to_thread(
+                    AnalyticsQueries.get_cached_movers,
+                    window_seconds=window,
+                    limit=500,
+                    direction="both",
+                )
 
             # Score using appropriate method
             if use_zscore:
