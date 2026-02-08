@@ -75,15 +75,35 @@ def render_filters():
 
 def get_alerts_data(limit: int, unack_only: bool, source: str) -> list[dict]:
     source_filter = source.lower() if source != "All" else None
-    # Fetch a wider pool only when source is not constrained, then apply UI filters.
-    query_limit = limit if source_filter else min(limit * 4, 1000)
-    return AnalyticsQueries.get_recent_alerts(
-        limit=query_limit,
+    if source_filter:
+        return AnalyticsQueries.get_recent_alerts(
+            limit=limit,
+            unconverged_only=unack_only,
+            dedupe_market_events=True,
+            exclude_expired=True,
+            source=source_filter,
+        )
+
+    # All-source mode: fetch per-source slices to prevent source starvation.
+    per_source_limit = min(max(limit * 2, 50), 1000)
+    kalshi = AnalyticsQueries.get_recent_alerts(
+        limit=per_source_limit,
         unconverged_only=unack_only,
         dedupe_market_events=True,
         exclude_expired=True,
-        source=source_filter,
+        source="kalshi",
     )
+    polymarket = AnalyticsQueries.get_recent_alerts(
+        limit=per_source_limit,
+        unconverged_only=unack_only,
+        dedupe_market_events=True,
+        exclude_expired=True,
+        source="polymarket",
+    )
+
+    combined = list(kalshi) + list(polymarket)
+    combined.sort(key=lambda row: row.get("created_at") or "", reverse=True)
+    return combined[: min(limit * 4, 1000)]
 
 
 def normalize_alerts(alerts: list[dict]) -> pd.DataFrame:
@@ -144,20 +164,6 @@ def apply_filters(df: pd.DataFrame, min_severity: str, hours) -> pd.DataFrame:
     return df
 
 
-def render_source_filter(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df
-    sources = sorted(df["Source"].dropna().unique().tolist())
-    selected = st.multiselect(
-        "Source",
-        options=sources,
-        default=sources,
-    )
-    if not selected:
-        return df.iloc[0:0]
-    return df[df["Source"].isin(selected)]
-
-
 def render_alerts_table(df: pd.DataFrame):
     if df.empty:
         st.info("No alerts matched these filters.")
@@ -203,7 +209,6 @@ if not alerts:
 else:
     df = normalize_alerts(alerts)
     df = apply_filters(df, filters["min_severity"], filters["hours"])
-    df = render_source_filter(df)
     if len(df) > filters["limit"]:
         df = df.head(filters["limit"])
     render_alerts_table(df)
