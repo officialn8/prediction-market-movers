@@ -3,6 +3,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 
 def _load_cleanup_module():
     script_path = (
@@ -68,3 +70,29 @@ def test_build_steps_default_and_optional_near_expiry():
         "near_expiry_extreme_spikes",
         "mirror_yes_no_duplicates",
     ]
+
+
+def test_validate_identifier_allows_safe_names_only():
+    cleanup = _load_cleanup_module()
+
+    assert cleanup._validate_identifier("alerts_suppressed_archive") == "alerts_suppressed_archive"
+    with pytest.raises(ValueError):
+        cleanup._validate_identifier("alerts-suppressed-archive")
+
+
+def test_run_rejects_invalid_archive_mode_combo(monkeypatch):
+    cleanup = _load_cleanup_module()
+
+    class DummyDB:
+        def health_check(self):
+            return True
+
+    monkeypatch.setattr(cleanup, "get_db_pool", lambda: DummyDB())
+
+    args = SimpleNamespace(
+        apply=False,
+        archive_only=True,
+        archive_first=True,
+    )
+    with pytest.raises(ValueError):
+        cleanup.run(args)

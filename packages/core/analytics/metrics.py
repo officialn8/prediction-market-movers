@@ -236,6 +236,87 @@ def is_significant_event(
     return is_significant, reason
 
 
+def alert_volume_threshold_multiplier(volume: Optional[Decimal | float]) -> float:
+    """
+    Adjust alert severity thresholds by liquidity.
+
+    Low-volume markets require larger moves to earn the same severity.
+    High-volume markets can earn severity at slightly smaller moves.
+    """
+    if volume is None:
+        return 1.0
+
+    volume_f = float(volume)
+    if volume_f < 5_000:
+        return 1.2
+    if volume_f > 25_000:
+        return 0.85
+    return 1.0
+
+
+def get_alert_severity_thresholds(
+    hours_to_expiry: Optional[float],
+    volume: Optional[Decimal | float] = None,
+) -> tuple[float, float, float]:
+    """
+    Compute (notable, significant, extreme) thresholds in pp.
+
+    Base thresholds tighten as expiry approaches to reduce resolution noise.
+    Volume then modulates those thresholds.
+    """
+    if hours_to_expiry is None or hours_to_expiry >= 240:
+        base = (10.0, 20.0, 40.0)
+    elif hours_to_expiry >= 48:
+        base = (15.0, 30.0, 50.0)
+    elif hours_to_expiry >= 24:
+        base = (20.0, 40.0, 60.0)
+    else:
+        base = (30.0, 55.0, 70.0)
+
+    mult = alert_volume_threshold_multiplier(volume)
+    return (
+        round(base[0] * mult, 2),
+        round(base[1] * mult, 2),
+        round(base[2] * mult, 2),
+    )
+
+
+def classify_alert_severity(
+    move_pp: Decimal | float,
+    hours_to_expiry: Optional[float],
+    volume: Optional[Decimal | float] = None,
+) -> str:
+    """
+    Classify alert severity using time-to-expiry and volume-aware thresholds.
+    """
+    abs_move = abs(float(move_pp))
+    notable, significant, extreme = get_alert_severity_thresholds(
+        hours_to_expiry=hours_to_expiry,
+        volume=volume,
+    )
+    if abs_move >= extreme:
+        return "extreme"
+    if abs_move >= significant:
+        return "significant"
+    if abs_move >= notable:
+        return "notable"
+    return "none"
+
+
+def should_suppress_settlement_snap(
+    move_pp: Decimal | float,
+    hours_to_expiry: Optional[float],
+    suppress_hours: float = 48.0,
+    suppress_move_pp: float = 80.0,
+) -> bool:
+    """
+    Suppress late-life settlement snaps that are usually non-actionable.
+    """
+    if hours_to_expiry is None:
+        return False
+    return hours_to_expiry < suppress_hours and abs(float(move_pp)) >= suppress_move_pp
+
+
 def calculate_price_velocity(
     prices: list[Tuple[Decimal, float]],  # List of (price, timestamp_seconds)
 ) -> Optional[Decimal]:

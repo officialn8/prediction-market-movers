@@ -205,6 +205,19 @@ async def run_alerts_check() -> None:
                 if market_id is None:
                     continue
 
+                hours_left = None
+                if end_date is not None:
+                    hours_left = (end_date - now).total_seconds() / 3600
+                    if metrics.should_suppress_settlement_snap(
+                        move_pp=move_pp,
+                        hours_to_expiry=hours_left,
+                    ):
+                        logger.debug(
+                            "Suppressed settlement snap "
+                            f"(market_id={market_id}, move_pp={move_pp}, hours_to_expiry={hours_left:.2f})"
+                        )
+                        continue
+
                 # Get dynamic threshold based on time-to-expiry
                 threshold = get_dynamic_threshold(end_date)
 
@@ -296,8 +309,7 @@ async def run_alerts_check() -> None:
                 alert_parts.append(f"${volume:,.0f} vol")
                 
                 # Add time-to-close context for closing markets
-                if end_date:
-                    hours_left = (end_date - now).total_seconds() / 3600
+                if hours_left is not None:
                     if hours_left <= 48:
                         alert_parts.append(f"closes in {hours_left:.0f}h")
                 

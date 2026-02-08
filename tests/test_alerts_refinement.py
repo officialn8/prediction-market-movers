@@ -41,6 +41,7 @@ def test_get_recent_alerts_dedupes_market_events_and_excludes_expired(monkeypatc
     query, _, _, _ = fake_db.calls[-1]
     assert "market_event_rank" in query
     assert "m.end_date IS NULL OR m.end_date > a.created_at" in query
+    assert "volume_at_alert" in query
 
 
 def test_get_recent_alert_for_market_supports_alert_type_filter(monkeypatch):
@@ -149,3 +150,55 @@ async def test_run_alerts_check_dedupes_yes_no_and_skips_expired(monkeypatch):
     assert len(inserted) == 1
     assert inserted[0]["token_id"] == UUID("00000000-0000-0000-0000-000000000201")
     assert inserted[0]["threshold_pp"] == Decimal("10.0")
+
+
+@pytest.mark.asyncio
+async def test_run_alerts_check_suppresses_settlement_snaps(monkeypatch):
+    now = datetime.now(timezone.utc)
+    near_expiry = now + timedelta(hours=12)
+
+    movers = [
+        {
+            "token_id": "00000000-0000-0000-0000-000000000211",
+            "market_id": "00000000-0000-0000-0000-000000000311",
+            "pct_change": "90.0",
+            "title": "Near Expiry Snap",
+            "outcome": "Yes",
+            "latest_volume": "12000",
+            "end_date": near_expiry,
+            "status": "active",
+        }
+    ]
+
+    inserted = []
+
+    monkeypatch.setattr(
+        alerts_job.AnalyticsQueries,
+        "get_cached_movers",
+        staticmethod(lambda **_kwargs: movers),
+    )
+    monkeypatch.setattr(
+        alerts_job.MarketQueries,
+        "get_top_movers",
+        staticmethod(lambda **_kwargs: []),
+    )
+    monkeypatch.setattr(
+        alerts_job.VolumeQueries,
+        "get_volume_spike_candidates",
+        staticmethod(lambda **_kwargs: []),
+    )
+    monkeypatch.setattr(
+        alerts_job.AnalyticsQueries,
+        "get_recent_alert_for_market",
+        staticmethod(lambda **_kwargs: None),
+    )
+    monkeypatch.setattr(
+        alerts_job.AnalyticsQueries,
+        "insert_alert",
+        staticmethod(lambda **kwargs: inserted.append(kwargs) or kwargs),
+    )
+    monkeypatch.setattr(alerts_job.settings, "signal_hold_zone_enabled", False)
+
+    await alerts_job.run_alerts_check()
+
+    assert inserted == []

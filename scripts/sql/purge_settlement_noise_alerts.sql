@@ -1,12 +1,23 @@
--- One-time cleanup for historical settlement-noise alerts.
+-- One-time archive-first cleanup for historical settlement-noise alerts.
 --
 -- What it removes:
 -- 1) Alerts that were created at/after market expiry or resolution.
 -- 2) Mirror YES/NO duplicate rows for the same market event bucket.
 --
--- Review counts with SELECT-only variants before running DELETE in production.
+-- This script archives rows into alerts_suppressed_archive before deletion.
+-- Review counts with SELECT-only variants before running in production.
 
 BEGIN;
+
+CREATE TABLE IF NOT EXISTS alerts_suppressed_archive (
+    archive_id BIGSERIAL PRIMARY KEY,
+    alert_id UUID NOT NULL,
+    suppression_reason TEXT NOT NULL,
+    archived_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    source_table TEXT NOT NULL DEFAULT 'alerts',
+    alert_row JSONB NOT NULL,
+    UNIQUE (alert_id, suppression_reason)
+);
 
 -- ---------------------------------------------------------------------------
 -- 1) Purge alerts created at/after expiry/resolution.
@@ -25,14 +36,30 @@ WITH to_delete AS (
         )
     )
 ),
+archived AS (
+    INSERT INTO alerts_suppressed_archive (
+        alert_id,
+        suppression_reason,
+        alert_row
+    )
+    SELECT
+        a.alert_id,
+        'expired_or_resolved_at_alert_time',
+        to_jsonb(a)
+    FROM alerts a
+    JOIN to_delete d ON d.alert_id = a.alert_id
+    ON CONFLICT (alert_id, suppression_reason) DO NOTHING
+    RETURNING alert_id
+),
 deleted AS (
     DELETE FROM alerts a
     USING to_delete d
     WHERE a.alert_id = d.alert_id
     RETURNING a.alert_id
 )
-SELECT COUNT(*) AS deleted_expired_or_resolved
-FROM deleted;
+SELECT
+    (SELECT COUNT(*) FROM archived) AS archived_expired_or_resolved,
+    (SELECT COUNT(*) FROM deleted) AS deleted_expired_or_resolved;
 
 -- ---------------------------------------------------------------------------
 -- 2) Purge mirror YES/NO duplicates (keep best row per market event bucket).
@@ -86,13 +113,29 @@ to_delete AS (
     FROM ranked
     WHERE rn > 1
 ),
+archived AS (
+    INSERT INTO alerts_suppressed_archive (
+        alert_id,
+        suppression_reason,
+        alert_row
+    )
+    SELECT
+        a.alert_id,
+        'mirror_yes_no_duplicates',
+        to_jsonb(a)
+    FROM alerts a
+    JOIN to_delete d ON d.alert_id = a.alert_id
+    ON CONFLICT (alert_id, suppression_reason) DO NOTHING
+    RETURNING alert_id
+),
 deleted AS (
     DELETE FROM alerts a
     USING to_delete d
     WHERE a.alert_id = d.alert_id
     RETURNING a.alert_id
 )
-SELECT COUNT(*) AS deleted_mirror_duplicates
-FROM deleted;
+SELECT
+    (SELECT COUNT(*) FROM archived) AS archived_mirror_duplicates,
+    (SELECT COUNT(*) FROM deleted) AS deleted_mirror_duplicates;
 
 COMMIT;

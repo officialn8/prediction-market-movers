@@ -3,6 +3,7 @@ from datetime import timedelta
 import pandas as pd
 import streamlit as st
 
+from packages.core.analytics import metrics
 from packages.core.storage.queries import AnalyticsQueries
 
 st.set_page_config(page_title="Alerts Log", page_icon="🚨", layout="wide")
@@ -12,20 +13,6 @@ st.markdown("History of significant market movements.")
 
 
 SEVERITY_ORDER = {"none": 0, "notable": 1, "significant": 2, "extreme": 3}
-MID_LIFE_EXTREME_HOURS = 24.0
-
-
-def classify_alert_severity(move_pp: float, hours_to_expiry: float | None) -> str:
-    abs_move = abs(move_pp)
-    if abs_move < 10:
-        return "none"
-    if abs_move < 20:
-        return "notable"
-    if abs_move < 40:
-        return "significant"
-    if hours_to_expiry is not None and hours_to_expiry >= MID_LIFE_EXTREME_HOURS:
-        return "extreme"
-    return "significant"
 
 
 def compute_hours_to_expiry(alert: dict) -> float | None:
@@ -41,6 +28,16 @@ def compute_hours_to_expiry(alert: dict) -> float | None:
     if pd.isna(created_at) or pd.isna(end_date):
         return None
     return float((end_date - created_at).total_seconds() / 3600.0)
+
+
+def compute_volume_at_alert(alert: dict) -> float | None:
+    raw_volume = alert.get("volume_at_alert")
+    if raw_volume is None:
+        return None
+    try:
+        return float(raw_volume)
+    except (TypeError, ValueError):
+        return None
 
 
 def render_filters():
@@ -83,6 +80,12 @@ def normalize_alerts(alerts: list[dict]) -> pd.DataFrame:
     for alert in alerts:
         move_pp = float(alert.get("move_pp") or 0)
         hours_to_expiry = compute_hours_to_expiry(alert)
+        volume_at_alert = compute_volume_at_alert(alert)
+        if metrics.should_suppress_settlement_snap(
+            move_pp=move_pp,
+            hours_to_expiry=hours_to_expiry,
+        ):
+            continue
         rows.append(
             {
                 "Time": alert.get("created_at"),
@@ -92,7 +95,12 @@ def normalize_alerts(alerts: list[dict]) -> pd.DataFrame:
                 "Threshold (pp)": float(alert.get("threshold_pp") or 0),
                 "Window (sec)": int(alert.get("window_seconds") or 0),
                 "Hours to Expiry": hours_to_expiry,
-                "Severity": classify_alert_severity(move_pp, hours_to_expiry),
+                "Volume at Alert ($)": volume_at_alert,
+                "Severity": metrics.classify_alert_severity(
+                    move_pp=move_pp,
+                    hours_to_expiry=hours_to_expiry,
+                    volume=volume_at_alert,
+                ),
                 "Source": (alert.get("source") or "unknown").upper(),
                 "Reason": alert.get("reason"),
                 "Symbol": alert.get("symbol"),
@@ -109,6 +117,7 @@ def normalize_alerts(alerts: list[dict]) -> pd.DataFrame:
         errors="coerce",
     )
     df["Hours to Expiry"] = pd.to_numeric(df["Hours to Expiry"], errors="coerce")
+    df["Volume at Alert ($)"] = pd.to_numeric(df["Volume at Alert ($)"], errors="coerce")
     df = df[df["Hours to Expiry"].isna() | (df["Hours to Expiry"] > 0)]
     return df
 
@@ -152,6 +161,7 @@ def render_alerts_table(df: pd.DataFrame):
                 "Threshold (pp)",
                 "Window (sec)",
                 "Hours to Expiry",
+                "Volume at Alert ($)",
                 "Severity",
                 "Source",
                 "Reason",
@@ -164,6 +174,7 @@ def render_alerts_table(df: pd.DataFrame):
             "Move (pp)": st.column_config.NumberColumn(format="%.2f"),
             "Threshold (pp)": st.column_config.NumberColumn(format="%.2f"),
             "Hours to Expiry": st.column_config.NumberColumn(format="%.1f h"),
+            "Volume at Alert ($)": st.column_config.NumberColumn(format="$%.0f"),
             "Acknowledged": st.column_config.DatetimeColumn(
                 format="D MMM, HH:mm:ss",
             ),

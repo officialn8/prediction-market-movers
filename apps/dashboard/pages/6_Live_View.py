@@ -23,6 +23,7 @@ from apps.dashboard.components import (
     render_volume_spike_alert,
     to_user_tz,
 )
+from packages.core.analytics import metrics as analytics_metrics
 from packages.core.storage import get_db_pool
 from packages.core.storage.queries import AnalyticsQueries, MarketQueries, VolumeQueries
 from packages.core.wss import WSSMetrics
@@ -453,23 +454,6 @@ def render_live_tape(seconds: int, limit: int, source: str | None = None):
     )
 
 
-def classify_alert_severity(move_pp: float) -> str:
-    return classify_alert_severity_with_expiry(move_pp, None)
-
-
-def classify_alert_severity_with_expiry(move_pp: float, hours_to_expiry: float | None) -> str:
-    abs_move = abs(move_pp)
-    if abs_move < 10:
-        return "none"
-    if abs_move < 20:
-        return "notable"
-    if abs_move < 40:
-        return "significant"
-    if hours_to_expiry is not None and hours_to_expiry >= 24:
-        return "extreme"
-    return "significant"
-
-
 def alert_hours_to_expiry(alert: dict) -> float | None:
     raw_hours = alert.get("hours_to_expiry")
     if raw_hours is not None:
@@ -483,6 +467,16 @@ def alert_hours_to_expiry(alert: dict) -> float | None:
     if pd.isna(created_at) or pd.isna(end_date):
         return None
     return float((end_date - created_at).total_seconds() / 3600.0)
+
+
+def alert_volume_at_alert(alert: dict) -> float | None:
+    raw_volume = alert.get("volume_at_alert")
+    if raw_volume is None:
+        return None
+    try:
+        return float(raw_volume)
+    except (TypeError, ValueError):
+        return None
 
 
 def render_alerts_stream(min_severity: str, limit: int):
@@ -502,7 +496,17 @@ def render_alerts_stream(min_severity: str, limit: int):
     for alert in alerts:
         move_pp = float(alert.get("move_pp") or 0)
         hours_to_expiry = alert_hours_to_expiry(alert)
-        severity = classify_alert_severity_with_expiry(move_pp, hours_to_expiry)
+        volume_at_alert = alert_volume_at_alert(alert)
+        if analytics_metrics.should_suppress_settlement_snap(
+            move_pp=move_pp,
+            hours_to_expiry=hours_to_expiry,
+        ):
+            continue
+        severity = analytics_metrics.classify_alert_severity(
+            move_pp=move_pp,
+            hours_to_expiry=hours_to_expiry,
+            volume=volume_at_alert,
+        )
         if severity_order.get(severity, 0) < min_level:
             continue
         if hours_to_expiry is not None and hours_to_expiry <= 0:
@@ -514,6 +518,7 @@ def render_alerts_stream(min_severity: str, limit: int):
                 "outcome": alert.get("outcome"),
                 "move_pp": move_pp,
                 "hours_to_expiry": hours_to_expiry,
+                "volume_at_alert": volume_at_alert,
                 "severity": severity,
                 "source": alert.get("source"),
                 "reason": alert.get("reason"),
@@ -532,6 +537,7 @@ def render_alerts_stream(min_severity: str, limit: int):
             "created_at": st.column_config.DatetimeColumn("Time", format="HH:mm:ss"),
             "move_pp": st.column_config.NumberColumn("Move (pp)", format="%.2f"),
             "hours_to_expiry": st.column_config.NumberColumn("Hours to Expiry", format="%.1f h"),
+            "volume_at_alert": st.column_config.NumberColumn("Volume at Alert", format="$%.0f"),
         },
         width="stretch",
         hide_index=True,

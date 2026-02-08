@@ -16,6 +16,9 @@ Usage:
   Purge:
     python scripts/cleanup_settlement_noise_alerts.py --apply
 
+  Archive-first purge (recommended for backtesting retention):
+    python scripts/cleanup_settlement_noise_alerts.py --apply --archive-first
+
   Purge with near-expiry spike cleanup:
     python scripts/cleanup_settlement_noise_alerts.py \
       --apply \
@@ -29,6 +32,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import sys
 from dataclasses import dataclass
 
@@ -79,6 +83,21 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=80.0,
         help="Minimum absolute move_pp for near-expiry spike cleanup",
+    )
+    parser.add_argument(
+        "--archive-first",
+        action="store_true",
+        help="Archive matching rows before deletion (only applies with --apply)",
+    )
+    parser.add_argument(
+        "--archive-only",
+        action="store_true",
+        help="Archive matching rows without deleting from alerts (requires --apply)",
+    )
+    parser.add_argument(
+        "--archive-table",
+        default="alerts_suppressed_archive",
+        help="Archive table name used when --archive-first is enabled",
     )
     parser.add_argument(
         "--log-level",
@@ -208,6 +227,66 @@ def _count_candidates(db, candidate_sql: str, params: tuple) -> int:
     return int(rows[0]["cnt"]) if rows else 0
 
 
+def _validate_identifier(identifier: str) -> str:
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", identifier):
+        raise ValueError(f"Invalid SQL identifier: {identifier}")
+    return identifier
+
+
+def _ensure_archive_table(db, table_name: str) -> None:
+    safe_table = _validate_identifier(table_name)
+    db.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {safe_table} (
+            archive_id BIGSERIAL PRIMARY KEY,
+            alert_id UUID NOT NULL,
+            suppression_reason TEXT NOT NULL,
+            archived_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            source_table TEXT NOT NULL DEFAULT 'alerts',
+            alert_row JSONB NOT NULL,
+            UNIQUE (alert_id, suppression_reason)
+        )
+        """
+    )
+
+
+def _archive_candidates(
+    db,
+    table_name: str,
+    suppression_reason: str,
+    candidate_sql: str,
+    params: tuple,
+) -> int:
+    safe_table = _validate_identifier(table_name)
+    rows = db.execute(
+        f"""
+        WITH to_archive AS (
+            {candidate_sql}
+        ),
+        archived AS (
+            INSERT INTO {safe_table} (
+                alert_id,
+                suppression_reason,
+                alert_row
+            )
+            SELECT
+                a.alert_id,
+                %s,
+                to_jsonb(a)
+            FROM alerts a
+            JOIN to_archive t ON t.alert_id = a.alert_id
+            ON CONFLICT (alert_id, suppression_reason) DO NOTHING
+            RETURNING alert_id
+        )
+        SELECT COUNT(*) AS cnt
+        FROM archived
+        """,
+        (*params, suppression_reason),
+        fetch=True,
+    ) or []
+    return int(rows[0]["cnt"]) if rows else 0
+
+
 def _delete_candidates(db, candidate_sql: str, params: tuple) -> int:
     rows = db.execute(
         f"""
@@ -277,6 +356,11 @@ def run(args: argparse.Namespace) -> dict[str, int]:
     if not db.health_check():
         raise RuntimeError("Database not available")
 
+    if args.archive_only and not args.apply:
+        raise ValueError("--archive-only requires --apply")
+    if args.archive_only and not args.archive_first:
+        raise ValueError("--archive-only requires --archive-first")
+
     before_total = _count_total_alerts(db)
     steps = _build_steps(args)
 
@@ -284,10 +368,33 @@ def run(args: argparse.Namespace) -> dict[str, int]:
     for step in steps:
         counts_by_step[step.name] = _count_candidates(db, step.candidate_sql, step.params)
 
+    archived_by_step: dict[str, int] = {}
     deleted_by_step: dict[str, int] = {}
     if args.apply:
+        if args.archive_first:
+            _ensure_archive_table(db, args.archive_table)
+
         for step in steps:
-            deleted = _delete_candidates(db, step.candidate_sql, step.params)
+            if args.archive_first:
+                archived = _archive_candidates(
+                    db=db,
+                    table_name=args.archive_table,
+                    suppression_reason=step.name,
+                    candidate_sql=step.candidate_sql,
+                    params=step.params,
+                )
+                archived_by_step[step.name] = archived
+                logger.info(
+                    "Archived %s rows for step=%s into %s",
+                    archived,
+                    step.name,
+                    args.archive_table,
+                )
+
+            if args.archive_only:
+                deleted = 0
+            else:
+                deleted = _delete_candidates(db, step.candidate_sql, step.params)
             deleted_by_step[step.name] = deleted
             logger.info("Deleted %s rows for step=%s", deleted, step.name)
 
@@ -297,6 +404,7 @@ def run(args: argparse.Namespace) -> dict[str, int]:
         "total_before": before_total,
         "total_after": after_total,
         "dry_run_candidate_sum": sum(counts_by_step.values()),
+        "archived_sum": sum(archived_by_step.values()),
         "deleted_sum": sum(deleted_by_step.values()),
     }
 
@@ -311,6 +419,14 @@ def run(args: argparse.Namespace) -> dict[str, int]:
             count,
         )
     if args.apply:
+        if args.archive_first:
+            for step_name, archived in archived_by_step.items():
+                logger.info(
+                    "APPLY | step=%s archived=%s table=%s",
+                    step_name,
+                    archived,
+                    args.archive_table,
+                )
         for step_name, deleted in deleted_by_step.items():
             logger.info(
                 "APPLY | step=%s deleted=%s",

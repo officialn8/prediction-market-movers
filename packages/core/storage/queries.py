@@ -860,6 +860,7 @@ class AnalyticsQueries:
                     m.source,
                     m.end_date,
                     m.status,
+                    COALESCE(sva.volume_24h, svl.volume_24h, 0) AS volume_at_alert,
                     CASE
                         WHEN m.end_date IS NOT NULL
                             THEN EXTRACT(EPOCH FROM (m.end_date - a.created_at)) / 3600.0
@@ -868,6 +869,23 @@ class AnalyticsQueries:
                 FROM alerts a
                 JOIN market_tokens mt ON a.token_id = mt.token_id
                 JOIN markets m ON mt.market_id = m.market_id
+                LEFT JOIN LATERAL (
+                    SELECT s.volume_24h
+                    FROM snapshots s
+                    WHERE s.token_id = a.token_id
+                      AND s.volume_24h IS NOT NULL
+                      AND s.ts <= a.created_at
+                    ORDER BY s.ts DESC
+                    LIMIT 1
+                ) sva ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT s.volume_24h
+                    FROM snapshots s
+                    WHERE s.token_id = a.token_id
+                      AND s.volume_24h IS NOT NULL
+                    ORDER BY s.ts DESC
+                    LIMIT 1
+                ) svl ON TRUE
                 WHERE {ack_filter}
                   {expiry_filter}
             ),
