@@ -33,6 +33,69 @@ COMBINED_MOVE_THRESHOLD = Decimal("5.0")    # 5% move when combined with spike
 COMBINED_SPIKE_THRESHOLD = Decimal("2.0")   # 2x spike when combined with move
 
 
+def _coerce_utc_datetime(value: Optional[datetime]) -> Optional[datetime]:
+    """Normalize optional datetimes to timezone-aware UTC."""
+    if value is None or not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _is_expired_or_resolved_market(mover: dict, now: datetime) -> bool:
+    """Return True when this mover belongs to a market that is no longer actionable."""
+    status = str(mover.get("status") or "").strip().lower()
+    if status and status != "active":
+        return True
+
+    end_date = _coerce_utc_datetime(mover.get("end_date"))
+    if end_date is not None and end_date <= now:
+        return True
+
+    return False
+
+
+def _select_market_level_candidates(movers: list[dict]) -> list[dict]:
+    """
+    Collapse YES/NO mirror rows by market.
+
+    We keep one candidate per market by largest absolute move, breaking ties in favor of YES.
+    """
+    selected: dict[str, dict] = {}
+
+    for mover in movers:
+        market_id = str(mover.get("market_id") or mover.get("token_id") or "")
+        if not market_id:
+            continue
+
+        try:
+            move_pp = Decimal(str(mover.get("pct_change", mover.get("move_pp", 0)) or 0))
+        except Exception:
+            move_pp = Decimal("0")
+        abs_move = abs(move_pp)
+
+        current = selected.get(market_id)
+        if current is None:
+            selected[market_id] = mover
+            continue
+
+        try:
+            current_move = Decimal(str(current.get("pct_change", current.get("move_pp", 0)) or 0))
+        except Exception:
+            current_move = Decimal("0")
+        current_abs_move = abs(current_move)
+
+        new_outcome = str(mover.get("outcome") or "").strip().upper()
+        cur_outcome = str(current.get("outcome") or "").strip().upper()
+        new_is_yes = new_outcome in {"YES", "Y"}
+        cur_is_yes = cur_outcome in {"YES", "Y"}
+
+        if abs_move > current_abs_move or (abs_move == current_abs_move and new_is_yes and not cur_is_yes):
+            selected[market_id] = mover
+
+    return list(selected.values())
+
+
 def _passes_hold_zone(
     move_edge_pp: Decimal,
     spike_edge_ratio: Optional[Decimal] = None,
@@ -103,6 +166,7 @@ async def run_alerts_check() -> None:
                 limit=100,
                 direction="both",
             )
+        movers = _select_market_level_candidates(movers)
 
         # Get volume spike data for enrichment
         volume_spike_map = {}
@@ -126,13 +190,20 @@ async def run_alerts_check() -> None:
 
         for mover in movers:
             try:
+                now = datetime.now(timezone.utc)
+                if _is_expired_or_resolved_market(mover, now):
+                    continue
+
                 token_id = UUID(str(mover["token_id"]))
                 token_id_str = str(token_id)
-                move_pp = Decimal(str(mover["pct_change"]))
+                move_pp = Decimal(str(mover.get("pct_change", mover.get("move_pp", 0)) or 0))
                 abs_move = abs(move_pp)
                 title = mover["title"]
                 outcome = mover["outcome"]
-                end_date = mover.get("end_date")
+                end_date = _coerce_utc_datetime(mover.get("end_date"))
+                market_id = mover.get("market_id")
+                if market_id is None:
+                    continue
 
                 # Get dynamic threshold based on time-to-expiry
                 threshold = get_dynamic_threshold(end_date)
@@ -189,8 +260,8 @@ async def run_alerts_check() -> None:
                     else "price_move"
                 )
                 existing = await asyncio.to_thread(
-                    AnalyticsQueries.get_recent_alert_for_token,
-                    token_id=token_id,
+                    AnalyticsQueries.get_recent_alert_for_market,
+                    market_id=market_id,
                     window_seconds=window_seconds,
                     lookback_minutes=30,
                     alert_type=alert_type,
@@ -226,9 +297,6 @@ async def run_alerts_check() -> None:
                 
                 # Add time-to-close context for closing markets
                 if end_date:
-                    now = datetime.now(timezone.utc)
-                    if end_date.tzinfo is None:
-                        end_date = end_date.replace(tzinfo=timezone.utc)
                     hours_left = (end_date - now).total_seconds() / 3600
                     if hours_left <= 48:
                         alert_parts.append(f"closes in {hours_left:.0f}h")

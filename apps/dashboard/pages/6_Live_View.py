@@ -454,32 +454,58 @@ def render_live_tape(seconds: int, limit: int, source: str | None = None):
 
 
 def classify_alert_severity(move_pp: float) -> str:
+    return classify_alert_severity_with_expiry(move_pp, None)
+
+
+def classify_alert_severity_with_expiry(move_pp: float, hours_to_expiry: float | None) -> str:
     abs_move = abs(move_pp)
-    if abs_move >= 10:
+    if abs_move < 10:
+        return "none"
+    if abs_move < 20:
+        return "notable"
+    if abs_move < 40:
+        return "significant"
+    if hours_to_expiry is not None and hours_to_expiry >= 24:
         return "extreme"
-    if abs_move >= 6:
-        return "high"
-    if abs_move >= 3:
-        return "medium"
-    if abs_move >= 1:
-        return "low"
-    return "none"
+    return "significant"
+
+
+def alert_hours_to_expiry(alert: dict) -> float | None:
+    raw_hours = alert.get("hours_to_expiry")
+    if raw_hours is not None:
+        try:
+            return float(raw_hours)
+        except (TypeError, ValueError):
+            return None
+
+    created_at = pd.to_datetime(alert.get("created_at"), utc=True, errors="coerce")
+    end_date = pd.to_datetime(alert.get("end_date"), utc=True, errors="coerce")
+    if pd.isna(created_at) or pd.isna(end_date):
+        return None
+    return float((end_date - created_at).total_seconds() / 3600.0)
 
 
 def render_alerts_stream(min_severity: str, limit: int):
-    alerts = AnalyticsQueries.get_recent_alerts(limit=limit)
+    alerts = AnalyticsQueries.get_recent_alerts(
+        limit=limit,
+        dedupe_market_events=True,
+        exclude_expired=True,
+    )
     if not alerts:
         st.info("No recent alerts.")
         return
 
-    severity_order = {"none": 0, "low": 1, "medium": 2, "high": 3, "extreme": 4}
+    severity_order = {"none": 0, "notable": 1, "significant": 2, "extreme": 3}
     min_level = severity_order.get(min_severity, 1)
 
     rows = []
     for alert in alerts:
         move_pp = float(alert.get("move_pp") or 0)
-        severity = classify_alert_severity(move_pp)
+        hours_to_expiry = alert_hours_to_expiry(alert)
+        severity = classify_alert_severity_with_expiry(move_pp, hours_to_expiry)
         if severity_order.get(severity, 0) < min_level:
+            continue
+        if hours_to_expiry is not None and hours_to_expiry <= 0:
             continue
         rows.append(
             {
@@ -487,6 +513,7 @@ def render_alerts_stream(min_severity: str, limit: int):
                 "market": alert.get("market_title"),
                 "outcome": alert.get("outcome"),
                 "move_pp": move_pp,
+                "hours_to_expiry": hours_to_expiry,
                 "severity": severity,
                 "source": alert.get("source"),
                 "reason": alert.get("reason"),
@@ -504,6 +531,7 @@ def render_alerts_stream(min_severity: str, limit: int):
         column_config={
             "created_at": st.column_config.DatetimeColumn("Time", format="HH:mm:ss"),
             "move_pp": st.column_config.NumberColumn("Move (pp)", format="%.2f"),
+            "hours_to_expiry": st.column_config.NumberColumn("Hours to Expiry", format="%.1f h"),
         },
         width="stretch",
         hide_index=True,
@@ -617,7 +645,7 @@ def main():
         st.markdown("### Alerts")
         alerts_min_severity = st.selectbox(
             "Min alert severity",
-            options=["low", "medium", "high", "extreme"],
+            options=["notable", "significant", "extreme"],
             index=1,
         )
         alerts_limit = st.slider("Alert rows", 10, 200, 50)

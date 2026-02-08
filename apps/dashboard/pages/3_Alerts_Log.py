@@ -11,20 +11,36 @@ st.title("🚨 Alerts Log")
 st.markdown("History of significant market movements.")
 
 
-SEVERITY_ORDER = {"none": 0, "low": 1, "medium": 2, "high": 3, "extreme": 4}
+SEVERITY_ORDER = {"none": 0, "notable": 1, "significant": 2, "extreme": 3}
+MID_LIFE_EXTREME_HOURS = 24.0
 
 
-def classify_alert_severity(move_pp: float) -> str:
+def classify_alert_severity(move_pp: float, hours_to_expiry: float | None) -> str:
     abs_move = abs(move_pp)
-    if abs_move >= 10:
+    if abs_move < 10:
+        return "none"
+    if abs_move < 20:
+        return "notable"
+    if abs_move < 40:
+        return "significant"
+    if hours_to_expiry is not None and hours_to_expiry >= MID_LIFE_EXTREME_HOURS:
         return "extreme"
-    if abs_move >= 6:
-        return "high"
-    if abs_move >= 3:
-        return "medium"
-    if abs_move >= 1:
-        return "low"
-    return "none"
+    return "significant"
+
+
+def compute_hours_to_expiry(alert: dict) -> float | None:
+    raw_hours = alert.get("hours_to_expiry")
+    if raw_hours is not None:
+        try:
+            return float(raw_hours)
+        except (TypeError, ValueError):
+            return None
+
+    created_at = pd.to_datetime(alert.get("created_at"), utc=True, errors="coerce")
+    end_date = pd.to_datetime(alert.get("end_date"), utc=True, errors="coerce")
+    if pd.isna(created_at) or pd.isna(end_date):
+        return None
+    return float((end_date - created_at).total_seconds() / 3600.0)
 
 
 def render_filters():
@@ -34,7 +50,7 @@ def render_filters():
     with col2:
         min_severity = st.selectbox(
             "Min severity",
-            options=["low", "medium", "high", "extreme", "none"],
+            options=["notable", "significant", "extreme", "none"],
             index=0,
         )
     with col3:
@@ -57,6 +73,8 @@ def get_alerts_data(limit: int, unack_only: bool) -> list[dict]:
     return AnalyticsQueries.get_recent_alerts(
         limit=limit,
         unconverged_only=unack_only,
+        dedupe_market_events=True,
+        exclude_expired=True,
     )
 
 
@@ -64,6 +82,7 @@ def normalize_alerts(alerts: list[dict]) -> pd.DataFrame:
     rows = []
     for alert in alerts:
         move_pp = float(alert.get("move_pp") or 0)
+        hours_to_expiry = compute_hours_to_expiry(alert)
         rows.append(
             {
                 "Time": alert.get("created_at"),
@@ -72,7 +91,8 @@ def normalize_alerts(alerts: list[dict]) -> pd.DataFrame:
                 "Move (pp)": move_pp,
                 "Threshold (pp)": float(alert.get("threshold_pp") or 0),
                 "Window (sec)": int(alert.get("window_seconds") or 0),
-                "Severity": classify_alert_severity(move_pp),
+                "Hours to Expiry": hours_to_expiry,
+                "Severity": classify_alert_severity(move_pp, hours_to_expiry),
                 "Source": (alert.get("source") or "unknown").upper(),
                 "Reason": alert.get("reason"),
                 "Symbol": alert.get("symbol"),
@@ -88,6 +108,8 @@ def normalize_alerts(alerts: list[dict]) -> pd.DataFrame:
         utc=True,
         errors="coerce",
     )
+    df["Hours to Expiry"] = pd.to_numeric(df["Hours to Expiry"], errors="coerce")
+    df = df[df["Hours to Expiry"].isna() | (df["Hours to Expiry"] > 0)]
     return df
 
 
@@ -129,6 +151,7 @@ def render_alerts_table(df: pd.DataFrame):
                 "Move (pp)",
                 "Threshold (pp)",
                 "Window (sec)",
+                "Hours to Expiry",
                 "Severity",
                 "Source",
                 "Reason",
@@ -140,6 +163,7 @@ def render_alerts_table(df: pd.DataFrame):
             "Time": st.column_config.DatetimeColumn(format="D MMM, HH:mm:ss"),
             "Move (pp)": st.column_config.NumberColumn(format="%.2f"),
             "Threshold (pp)": st.column_config.NumberColumn(format="%.2f"),
+            "Hours to Expiry": st.column_config.NumberColumn(format="%.1f h"),
             "Acknowledged": st.column_config.DatetimeColumn(
                 format="D MMM, HH:mm:ss",
             ),

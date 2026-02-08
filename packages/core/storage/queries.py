@@ -833,23 +833,67 @@ class AnalyticsQueries:
         return result[0] if result else {}
 
     @staticmethod
-    def get_recent_alerts(limit: int = 50, unconverged_only: bool = False) -> list[dict]:
-        """Get recent alerts."""
+    def get_recent_alerts(
+        limit: int = 50,
+        unconverged_only: bool = False,
+        dedupe_market_events: bool = True,
+        exclude_expired: bool = True,
+    ) -> list[dict]:
+        """Get recent alerts with optional market-level dedupe and expiry filtering."""
         db = get_db_pool()
-        filter_clause = "WHERE acknowledged_at IS NULL" if unconverged_only else ""
-        
+        ack_filter = "a.acknowledged_at IS NULL" if unconverged_only else "1 = 1"
+        expiry_filter = (
+            "AND (m.end_date IS NULL OR m.end_date > a.created_at)"
+            if exclude_expired
+            else ""
+        )
+        dedupe_filter = "WHERE market_event_rank = 1" if dedupe_market_events else ""
+
         query = f"""
-            SELECT 
-                a.*,
-                mt.outcome,
-                mt.symbol,
-                m.title as market_title,
-                m.source
-            FROM alerts a
-            JOIN market_tokens mt ON a.token_id = mt.token_id
-            JOIN markets m ON mt.market_id = m.market_id
-            {filter_clause}
-            ORDER BY a.created_at DESC
+            WITH joined AS (
+                SELECT
+                    a.*,
+                    mt.market_id,
+                    mt.outcome,
+                    mt.symbol,
+                    m.title AS market_title,
+                    m.source,
+                    m.end_date,
+                    m.status,
+                    CASE
+                        WHEN m.end_date IS NOT NULL
+                            THEN EXTRACT(EPOCH FROM (m.end_date - a.created_at)) / 3600.0
+                        ELSE NULL
+                    END AS hours_to_expiry
+                FROM alerts a
+                JOIN market_tokens mt ON a.token_id = mt.token_id
+                JOIN markets m ON mt.market_id = m.market_id
+                WHERE {ack_filter}
+                  {expiry_filter}
+            ),
+            ranked AS (
+                SELECT
+                    j.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY
+                            j.market_id,
+                            j.window_seconds,
+                            COALESCE(j.alert_type, 'price_move'),
+                            DATE_TRUNC('minute', j.created_at)
+                        ORDER BY
+                            ABS(j.move_pp) DESC,
+                            CASE
+                                WHEN UPPER(COALESCE(j.outcome, '')) IN ('YES', 'Y') THEN 0
+                                ELSE 1
+                            END,
+                            j.created_at DESC
+                    ) AS market_event_rank
+                FROM joined j
+            )
+            SELECT *
+            FROM ranked
+            {dedupe_filter}
+            ORDER BY created_at DESC
             LIMIT %s
         """
         return db.execute(query, (limit,), fetch=True) or []
@@ -888,6 +932,33 @@ class AnalyticsQueries:
             tuple(params),
             fetch=True
         )
+        return result[0] if result else None
+
+    @staticmethod
+    def get_recent_alert_for_market(
+        market_id: UUID,
+        window_seconds: int = 3600,
+        lookback_minutes: int = 30,
+        alert_type: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Check if an alert was generated for this market recently."""
+        db = get_db_pool()
+        type_filter = "AND a.alert_type = %s" if alert_type else ""
+        query = f"""
+            SELECT a.*
+            FROM alerts a
+            JOIN market_tokens mt ON a.token_id = mt.token_id
+            WHERE mt.market_id = %s
+              AND a.window_seconds = %s
+              AND a.created_at > NOW() - (%s * INTERVAL '1 minute')
+              {type_filter}
+            ORDER BY a.created_at DESC
+            LIMIT 1
+        """
+        params = [str(market_id), window_seconds, lookback_minutes]
+        if alert_type:
+            params.append(alert_type)
+        result = db.execute(query, tuple(params), fetch=True)
         return result[0] if result else None
 
     @staticmethod
@@ -936,12 +1007,16 @@ class AnalyticsQueries:
                     m.source,
                     m.category,
                     m.source_id,
-                    m.url
+                    m.url,
+                    m.status,
+                    m.end_date
                 FROM movers_cache mc
                 JOIN latest_batch lb ON mc.as_of_ts = lb.max_ts
                 JOIN market_tokens mt ON mc.token_id = mt.token_id
                 JOIN markets m ON mt.market_id = m.market_id
                 WHERE mc.window_seconds = %s
+                  AND m.status = 'active'
+                  AND (m.end_date IS NULL OR m.end_date > NOW())
                   {source_filter}
                   {category_filter}
                   {direction_filter}
